@@ -25,11 +25,32 @@ struct Cli {
     #[arg(long, default_value_t = 0)]
     seed: u64,
 
+    #[arg(short, default_value_t = 2048)]
+    num_tokens: usize,
+
+    #[arg(long, default_value_t = false)]
+    disable_cache: bool,
+
     #[arg(long, default_value_t = false)]
     greedy: bool,
 
-    #[arg(short, default_value_t = 4096)]
-    num_tokens: usize,
+    #[arg(long, default_value_t = 0.95)]
+    top_p: f32,
+
+    #[arg(long, default_value_t = 40)]
+    top_k: usize,
+
+    #[arg(long, default_value_t = 0.8)]
+    temperature: f32,
+
+    #[arg(long, default_value_t = false)]
+    bench: bool,
+
+    #[arg(long, default_value_t = 1)] //cache_size / seq_len(training)
+    pos_scale: usize,
+
+    #[arg(long, default_value_t = 2048)]
+    cache_size: usize,
 
     #[arg(
         long,
@@ -64,13 +85,16 @@ fn main() -> Result<()> {
 
     let m = PhiLM::<f32, _, _>::load_model(cfg, &dev, &loader)?;
 
-    let bench = true;
-
     let gen_opt = GenerateOption {
-        use_cache: true,
+        use_cache: !args.disable_cache,
         verbose: true,
         greedy: args.greedy,
-        cache_size: 4096,
+        top_k: args.top_k,
+        top_p: args.top_p,
+        temperature: args.temperature,
+        max_seq_len: args.num_tokens,
+        pos_scale: args.pos_scale,
+        cache_size: args.cache_size,
         ..Default::default()
     };
 
@@ -85,7 +109,7 @@ fn main() -> Result<()> {
         args.num_tokens,
         &gen_opt,
     );
-    if bench {
+    if args.bench {
         print_metrics(start.elapsed(), gen_num);
     }
 
