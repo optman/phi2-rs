@@ -46,8 +46,9 @@ impl<KvHeads: Dim, HeadDim: Dim, Layers: Dim, E: Dtype, D: Device<E>>
         max_cache_size: usize,
     ) -> <Self as Entry>::E {
         let cc = if let Some(mut cc) = Option::take(c) {
-            if cc.shape().0.size() >= max_cache_size {
-                cc = cc.slice((..max_cache_size - 1, .., ..));
+            let len = cc.shape().0.size();
+            if len >= max_cache_size {
+                cc = cc.slice((len - max_cache_size + 1.., .., ..));
             }
             (cc, new_item).concat_tensor_along(Axis::<0>)
         } else {
