@@ -4,14 +4,14 @@ use dfdx::prelude::*;
 pub struct ConfigV2 {}
 
 impl Params for ConfigV2 {
-    type Vocab = Const<51200>;
-    type Hidden = Const<2560>;
-    type MlpDim = Const<10240>;
+    type Vocab = Const<32000>;
+    type Hidden = Const<2048>;
+    type MlpDim = Const<5632>;
     type Heads = Const<32>;
-    type HeadDim = Const<80>;
-    type QkvDim = Const<7680>;
-    type Layers = Const<32>;
-    type RoeDim = Const<32>;
+    type HeadDim = Const<64>;
+    type KvHeads = Const<4>;
+    type KvDim = Const<256>;
+    type Layers = Const<22>;
 
     const MAX_SEQ_LEN: usize = 4096;
     const ROE_BASE: i64 = 10000;
@@ -36,15 +36,15 @@ impl Params for ConfigV2 {
         Self::HeadDim {}
     }
 
-    fn qkv_dim(&self) -> Self::QkvDim {
-        Self::QkvDim {}
+    fn kv_heads(&self) -> Self::KvHeads {
+        Self::KvHeads {}
+    }
+
+    fn kv_dim(&self) -> Self::KvDim {
+        Self::KvDim {}
     }
 
     fn layers(&self) -> Self::Layers {
         Self::Layers {}
-    }
-
-    fn roe_dim(&self) -> Self::RoeDim {
-        Self::RoeDim {}
     }
 }

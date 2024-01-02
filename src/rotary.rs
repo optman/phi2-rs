@@ -37,11 +37,16 @@ impl<RotaryDim: Dim, E: Dtype, D: Device<E>> RotaryEmbedding<RotaryDim, E, D> {
         pos: usize,
         pos_scale: usize,
     ) -> Result<Tensor<(Seq, Headers, HeadDim), E, D>, Error> {
-        let seq = x.shape().0;
+        let (seq, _header, head_dim) = *x.shape();
         let rotary_dim = self.rotary_dim.size();
-        let x_rot: Tensor<(Seq, Headers, RotaryDim), _, _> =
-            x.clone().slice((.., .., ..rotary_dim)).realize();
-        let x_pass = x.slice((.., .., rotary_dim..));
+        let (x_rot, x_pass) = if rotary_dim < head_dim.size() {
+            (
+                x.clone().slice((.., .., ..rotary_dim)).realize(),
+                Some(x.slice((.., .., rotary_dim..))),
+            )
+        } else {
+            (x.realize(), None)
+        };
 
         let half_rotary_dim = rotary_dim / 2;
         let first_half = x_rot.clone().slice((.., .., ..half_rotary_dim));
@@ -66,9 +71,12 @@ impl<RotaryDim: Dim, E: Dtype, D: Device<E>> RotaryEmbedding<RotaryDim, E, D> {
             + sub_cos.broadcast_like(&x_rot) * x_rot)
             .realize();
 
-        let y = (y, x_pass).concat_tensor_along(Axis::<2>).realize();
+        let y = match x_pass {
+            Some(x_pass) => (y, x_pass).concat_tensor_along(Axis::<2>).realize(),
+            None => y,
+        };
 
-        Ok(y)
+        Ok(y.realize())
     }
 
     pub fn new(dev: &D, rotary_dim: RotaryDim, max_seq: usize, base: i64) -> Self {

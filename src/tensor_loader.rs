@@ -1,9 +1,9 @@
-use ::safetensors::SafeTensorError;
+use ::safetensors::tensor::{SafeTensorError, SafeTensors};
 use anyhow::{Error, Result};
-use dfdx::dtypes::f16;
 use dfdx::prelude::*;
-use dfdx::safetensors::SafeTensors;
+use half::bf16;
 use std::rc::Rc;
+use std::vec::Vec;
 
 #[derive(yoke::Yokeable)]
 struct SafeTensors_<'a>(SafeTensors<'a>);
@@ -57,16 +57,16 @@ impl SafeTensorLoader {
         path: &str,
     ) -> Result<Tensor<S, E, D>>
     where
-        D: Device<f16> + ToDtypeKernel<f16, E>,
+        D: Device<f32> + ToDtypeKernel<f32, E>,
     {
         let mut paths = self.prefixs.clone();
         paths.push(path.to_owned());
         let full_path = paths.join(".");
 
-        let mut t: Tensor<_, f16, _> = dev.zeros();
+        let mut t: Tensor<_, f32, _> = dev.zeros();
         let mut err = None;
         for ts in &*self.tensors {
-            match t.load_safetensor(&ts.get().0, &full_path) {
+            match load_safetensor_bf16(&mut t, &ts.get().0, &full_path) {
                 Ok(_) => {
                     return Ok(t.to_dtype::<E>());
                 }
@@ -83,4 +83,27 @@ impl SafeTensorLoader {
             Some(err) => Err(err),
         }
     }
+}
+
+fn load_safetensor_bf16<S: Shape, E: Dtype, D: CopySlice<E>>(
+    t: &mut Tensor<S, E, D>,
+    tensors: &SafeTensors,
+    key: &str,
+) -> Result<(), SafeTensorError> {
+    let tensor_view = tensors.tensor(key)?;
+    let v = tensor_view.data();
+    assert_eq!(
+        tensor_view.shape(),
+        t.shape().concrete().into(),
+        "SafeTensors shape did not match tensor shape"
+    );
+    let mut c = Vec::with_capacity(v.len() / 2);
+    let mut i = 0;
+    while i < v.len() {
+        let value: f32 = bf16::from_le_bytes([v[i], v[i + 1]]).to_f32();
+        c.push(E::from_f32(value).unwrap());
+        i += 2;
+    }
+    t.copy_from(&c);
+    Ok(())
 }

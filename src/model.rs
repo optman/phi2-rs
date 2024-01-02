@@ -1,5 +1,6 @@
 use crate::cache::Cache;
 use crate::nn_loader::*;
+use crate::rmsnorm::RmsNorm;
 use crate::rotary::RotaryEmbedding;
 use crate::tensor_loader::SafeTensorLoader;
 use anyhow::Result;
@@ -14,8 +15,10 @@ impl Dtype for AMP<f16> {}
 
 #[allow(clippy::upper_case_acronyms)]
 struct MHA<E: Dtype, P: Params, D: Device<E>> {
-    wqkv: Linear<P::Hidden, P::QkvDim, E, D>,
-    out_proj: Linear<P::Hidden, P::Hidden, E, D>,
+    k_proj: Linear<P::Hidden, P::KvDim, E, D>,
+    q_proj: Linear<P::Hidden, P::Hidden, E, D>,
+    v_proj: Linear<P::Hidden, P::KvDim, E, D>,
+    o_proj: Linear<P::Hidden, P::Hidden, E, D>,
     p: P,
 }
 #[allow(clippy::type_complexity)]
@@ -26,57 +29,50 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
         layer: usize,
         pos: usize,
         pos_scale: usize,
-        pos_enc: &RotaryEmbedding<P::RoeDim, E, D>,
-        mut cache: Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
+        pos_enc: &RotaryEmbedding<P::HeadDim, E, D>,
+        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
         mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
     ) -> Result<
         (
             Tensor<(Seq, P::Hidden), E, D>,
-            Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
+            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
             Option<Tensor<(P::Heads, usize, usize), E, D>>,
         ),
         Error,
     > {
         let dev = x.dev().clone();
         let (seq, hidden) = *x.shape();
-        let qkv = self
-            .wqkv
-            .try_forward(x)?
-            .try_reshape_like(&(seq, Const::<3>, hidden))?;
+        let q = self.q_proj.try_forward(x.clone())?;
+        let k = self.k_proj.try_forward(x.clone())?;
+        let v = self.v_proj.try_forward(x)?;
 
-        let qk_idx: Vec<_> = vec![vec![0, 1]; seq.size()].into_iter().flatten().collect();
-        let qks = (seq.size(), 2 * self.p.heads().size(), self.p.head_dim());
-        let qk = qkv
-            .clone()
-            .gather(dev.tensor_from_vec(qk_idx, (seq, Const::<2>)))
-            .reshape_like(&qks);
+        let qs = (seq.size(), self.p.heads(), self.p.head_dim());
+        let q = pos_enc.try_forward(q.reshape_like(&qs), pos, pos_scale)?;
 
-        let vs = (seq.size(), self.p.heads(), self.p.head_dim());
-        let mut v = qkv
-            .clone()
-            .select(dev.tensor_from_vec(vec![2; seq.size()], (seq,)))
-            .reshape_like(&vs);
+        let kvs = (seq.size(), self.p.kv_heads(), self.p.head_dim());
+        let mut k = pos_enc.try_forward(k.reshape_like(&kvs), pos, pos_scale)?;
 
-        let qks = (seq.size(), Const::<2>, self.p.heads(), self.p.head_dim());
-        let qk = pos_enc.try_forward(qk, pos, pos_scale)?.reshape_like(&qks);
-
-        let q = qk
-            .clone()
-            .select(dev.tensor_from_vec(vec![0; seq.size()], (seq.size(),)));
-        let mut k = qk
-            .clone()
-            .select(dev.tensor_from_vec(vec![1; seq.size()], (seq.size(),)));
+        let mut v = v.reshape_like(&kvs);
 
         if let Some(cache) = cache.as_mut() {
             (k, v) = cache.append(layer, k, v);
         }
 
+        let repeate = self.p.heads().size() / self.p.kv_heads().size();
         let (kv_seq, _headers, _header_dim) = k.shape().concrete().into();
+        let kvs2 = (kv_seq, self.p.kv_heads(), repeate, self.p.head_dim());
+        let kvs3 = (kv_seq, self.p.heads(), self.p.head_dim());
 
         //(seq, header, header_dim) -> (headers, seq, header_dim)
         let q = q.permute::<_, Axes3<1, 0, 2>>();
-        let k = k.permute::<_, Axes3<1, 0, 2>>();
-        let v = v.permute::<_, Axes3<1, 0, 2>>();
+        let k = k
+            .broadcast_like(&kvs2)
+            .try_reshape_like(&kvs3)?
+            .permute::<_, Axes3<1, 0, 2>>();
+        let v = v
+            .broadcast_like(&kvs2)
+            .try_reshape_like(&kvs3)?
+            .permute::<_, Axes3<1, 0, 2>>();
 
         let scale = (self.p.head_dim().size() as f64).sqrt().recip();
         let mut att = q.matmul(k.permute::<_, Axes3<0, 2, 1>>()) * scale;
@@ -98,11 +94,10 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
         let v: Tensor<(Seq, P::Hidden), _, _> = att
             .matmul(v)
             .permute::<_, Axes3<1, 0, 2>>()
-            //.contiguous()
             .try_reshape_like(&(seq, hidden))?
             .realize();
 
-        let out = self.out_proj.try_forward(v)?;
+        let out = self.o_proj.try_forward(v)?;
         Ok((out, cache, Some(mask)))
     }
 }
@@ -110,21 +105,24 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
 #[allow(clippy::upper_case_acronyms)]
 struct MLP<E: Dtype, P: Params, D: Device<E>> {
     fc1: Linear<P::Hidden, P::MlpDim, E, D>,
-    fc2: Linear<P::MlpDim, P::Hidden, E, D>,
+    fc2: Linear<P::Hidden, P::MlpDim, E, D>,
+    proj: Linear<P::MlpDim, P::Hidden, E, D>,
 }
 impl<E: Dtype, P: Params, D: Device<E>> MLP<E, P, D> {
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
     ) -> Result<Tensor<(Seq, P::Hidden), E, D>> {
-        let x = self.fc1.try_forward(x)?;
-        let x = x.fast_gelu();
-        let x = self.fc2.try_forward(x)?;
-        Ok(x)
+        let y1 = self.fc1.try_forward(x.clone())?;
+        let y1 = y1.clone().sigmoid() * y1;
+        let y2 = self.fc2.try_forward(x)?;
+        let y = self.proj.try_forward(y1 * y2)?;
+        Ok(y)
     }
 }
 struct Block<E: Dtype, P: Params, D: Device<E>> {
-    ln: LayerNorm1D<P::Hidden, E, D>,
+    rms_1: RmsNorm<P::Hidden, E, D>,
+    rms_2: RmsNorm<P::Hidden, E, D>,
     mha: MHA<E, P, D>,
     mlp: MLP<E, P, D>,
 }
@@ -137,69 +135,93 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
         layer: usize,
         pos: usize,
         pos_scale: usize,
-        pos_enc: &RotaryEmbedding<P::RoeDim, E, D>,
-        cache: Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
+        pos_enc: &RotaryEmbedding<P::HeadDim, E, D>,
+        cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
         mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
     ) -> Result<(
         Tensor<(Seq, P::Hidden), E, D>,
-        Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
+        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
         Option<Tensor<(P::Heads, usize, usize), E, D>>,
     )> {
         let residual = x.clone();
-        let x = self.ln.try_forward(x)?;
-        let (attn_out, cache, mask) =
-            self.mha
-                .try_forward(x.clone(), layer, pos, pos_scale, pos_enc, cache, mask)?;
-        let mlp_out = self.mlp.try_forward(x)?;
-        Ok((residual + attn_out + mlp_out, cache, mask))
+        let (attn_out, cache, mask) = self.mha.try_forward(
+            self.rms_1.try_forward(x.clone())?,
+            layer,
+            pos,
+            pos_scale,
+            pos_enc,
+            cache,
+            mask,
+        )?;
+        let x = attn_out + residual;
+        let residual = x.clone();
+        let mlp_out = self.mlp.try_forward(self.rms_2.try_forward(x)?)?;
+        Ok((residual + mlp_out, cache, mask))
     }
 }
 
 pub struct PhiLM<E: Dtype, P: Params, D: Device<E>> {
     embedding: Embedding<P::Vocab, P::Hidden, E, D>,
     blocks: Vec<Block<E, P, D>>,
-    lm_ln: LayerNorm1D<P::Hidden, E, D>,
-    lm_linear: Linear<P::Hidden, P::Vocab, E, D>,
-    pos_enc: RotaryEmbedding<P::RoeDim, E, D>,
+    ln: RmsNorm<P::Hidden, E, D>,
+    lm: Linear<P::Hidden, P::Vocab, E, D>,
+    pos_enc: RotaryEmbedding<P::HeadDim, E, D>,
     p: P,
 }
 
 impl<E: Dtype, P: Params, D: Device<E>> PhiLM<E, P, D> {
     pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self>
     where
-        D: Device<f16> + ToDtypeKernel<f16, E>,
+        D: Device<f32> + ToDtypeKernel<f32, E>,
     {
-        let loader = loader.sub("transformer");
-        let embedding = load_emedding(dev, &loader.sub("embd.wte"))?;
+        let loader = loader.sub("model");
+        let ln = load_rmsnorm(dev, &loader.sub("norm"))?;
+        let embedding = load_emedding(dev, &loader.sub("embed_tokens"))?;
 
         let mut blocks = Vec::new();
 
         for i in 0..p.layers().size() {
-            let loader = loader.sub(format!("h.{i}"));
-            let ln = load_layernorm(dev, &loader.sub("ln"))?;
-            let wqkv = load_linear(dev, &loader.sub("mixer.Wqkv"))?;
-            let out_proj = load_linear(dev, &loader.sub("mixer.out_proj"))?;
-            let fc1 = load_linear(dev, &loader.sub("mlp.fc1"))?;
-            let fc2 = load_linear(dev, &loader.sub("mlp.fc2"))?;
+            let loader = loader.sub(format!("layers.{i}"));
+            let in_ln = load_rmsnorm(dev, &loader.sub("input_layernorm"))?;
+            let post_ln = load_rmsnorm(dev, &loader.sub("post_attention_layernorm"))?;
+
+            let k_proj = load_linear(dev, &loader.sub("self_attn.k_proj"))?;
+            let q_proj = load_linear(dev, &loader.sub("self_attn.q_proj"))?;
+            let v_proj = load_linear(dev, &loader.sub("self_attn.v_proj"))?;
+            let o_proj = load_linear(dev, &loader.sub("self_attn.o_proj"))?;
+
+            let down_proj = load_linear(dev, &loader.sub("mlp.down_proj"))?;
+            let up_proj = load_linear(dev, &loader.sub("mlp.up_proj"))?;
+            let gate_proj = load_linear(dev, &loader.sub("mlp.gate_proj"))?;
 
             blocks.push(Block {
-                ln,
-                mha: MHA { wqkv, out_proj, p },
-                mlp: MLP { fc1, fc2 },
+                rms_1: in_ln,
+                rms_2: post_ln,
+                mha: MHA {
+                    k_proj,
+                    q_proj,
+                    v_proj,
+                    o_proj,
+                    p,
+                },
+                mlp: MLP {
+                    fc1: gate_proj,
+                    fc2: up_proj,
+                    proj: down_proj,
+                },
             });
         }
 
         let loader = loader.root();
-        let lm_ln = load_layernorm(dev, &loader.sub("lm_head.ln"))?;
-        let lm_linear = load_linear(dev, &loader.sub("lm_head.linear"))?;
+        let lm = load_linear(dev, &loader.sub("lm_head"))?;
 
-        let pos_enc = RotaryEmbedding::new(dev, p.roe_dim(), P::MAX_SEQ_LEN, P::ROE_BASE);
+        let pos_enc = RotaryEmbedding::new(dev, p.head_dim(), P::MAX_SEQ_LEN, P::ROE_BASE);
 
         Ok(Self {
             embedding,
             blocks,
-            lm_ln,
-            lm_linear,
+            ln,
+            lm,
             pos_enc,
             p,
         })
@@ -211,18 +233,18 @@ impl<E: Dtype, P: Params, D: Device<E>> PhiLM<E, P, D> {
         x: Tensor<(Seq,), usize, D>,
         pos: usize,
         pos_scale: usize,
-        mut cache: Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
+        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
     ) -> Result<(
         Tensor<(Seq, P::Vocab), E, D>,
-        Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
+        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
     )> {
         let mut x = self.embedding.try_forward(x)?;
         let mut mask = None;
         for (i, b) in self.blocks.iter().enumerate() {
             (x, cache, mask) = b.try_forward(x, i, pos, pos_scale, &self.pos_enc, cache, mask)?;
         }
-        let x = self.lm_ln.try_forward(x)?;
-        let x = self.lm_linear.try_forward(x)?;
+        let x = self.ln.try_forward(x)?;
+        let x = self.lm.try_forward(x)?;
         Ok((x, cache))
     }
 
@@ -237,9 +259,9 @@ pub trait Params: Debug + Clone + Copy {
     type MlpDim: ConstDim;
     type Heads: ConstDim;
     type HeadDim: ConstDim;
-    type QkvDim: ConstDim;
+    type KvHeads: ConstDim;
+    type KvDim: ConstDim;
     type Layers: ConstDim;
-    type RoeDim: ConstDim;
     const MAX_SEQ_LEN: usize;
     const ROE_BASE: i64;
 
@@ -248,7 +270,7 @@ pub trait Params: Debug + Clone + Copy {
     fn mlp_dim(&self) -> Self::MlpDim;
     fn heads(&self) -> Self::Heads;
     fn head_dim(&self) -> Self::HeadDim;
-    fn qkv_dim(&self) -> Self::QkvDim;
+    fn kv_heads(&self) -> Self::KvHeads;
+    fn kv_dim(&self) -> Self::KvDim;
     fn layers(&self) -> Self::Layers;
-    fn roe_dim(&self) -> Self::RoeDim;
 }

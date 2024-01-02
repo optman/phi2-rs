@@ -7,6 +7,8 @@ use model::PhiLM;
 
 mod nn_loader;
 
+mod rmsnorm;
+
 mod tensor_loader;
 use tensor_loader::SafeTensorLoader;
 use tokenizers::Tokenizer;
@@ -55,7 +57,11 @@ struct Cli {
     #[arg(
         long,
         short,
-        default_value = "Write a detailed analogy between mathematics and a lighthouse."
+        default_value = "<|system|>
+You are a chatbot who can help code!</s>
+<|user|>
+Write me a function to calculate the first 10 digits of the fibonacci sequence in Python and print it out to the CLI.</s>
+<|assistant|>"
     )]
     prompt: String,
 
@@ -69,15 +75,14 @@ fn main() -> Result<()> {
     let mut rng = StdRng::seed_from_u64(args.seed);
 
     let root = args.model_path;
-    let paths = vec![
-        format!("{root}/model-00001-of-00002.safetensors"),
-        format!("{root}/model-00002-of-00002.safetensors"),
-    ];
+    let paths = vec![format!("{root}/model.safetensors")];
 
     let tokenizer_model = format!("{root}/tokenizer.json");
     let tokenizer = Tokenizer::from_file(tokenizer_model).map_err(anyhow::Error::msg)?;
 
     let loader = SafeTensorLoader::new(paths.into_iter().map(|f| f.to_owned()).collect())?;
+
+    let eos_token = "</s>";
 
     let dev = AutoDevice::default();
 
@@ -108,6 +113,7 @@ fn main() -> Result<()> {
         &args.prompt,
         args.num_tokens,
         &gen_opt,
+        eos_token,
     );
     if args.bench {
         print_metrics(start.elapsed(), gen_num);
