@@ -18,6 +18,7 @@ where
 pub(crate) fn load_rmsnorm<M: ConstDim, E: Dtype, D: Device<E>>(
     dev: &D,
     loader: &SafeTensorLoader,
+    eps: f64,
 ) -> Result<RmsNorm<M, E, D>>
 where
     D: Device<f32>,
@@ -26,7 +27,7 @@ where
 
     Ok(RmsNorm {
         gamma,
-        epsilon: 1e-5,
+        epsilon: eps,
     })
 }
 pub(crate) fn load_linear<I: ConstDim, O: ConstDim, E: Dtype, D: Device<E>>(

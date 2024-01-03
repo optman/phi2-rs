@@ -175,15 +175,19 @@ impl<E: Dtype, P: Params, D: Device<E>> PhiLM<E, P, D> {
         D: Device<f32> + ToDtypeKernel<f32, E>,
     {
         let loader = loader.sub("model");
-        let ln = load_rmsnorm(dev, &loader.sub("norm"))?;
+        let ln = load_rmsnorm(dev, &loader.sub("norm"), P::RMS_NORM_EPS)?;
         let embedding = load_emedding(dev, &loader.sub("embed_tokens"))?;
 
         let mut blocks = Vec::new();
 
         for i in 0..p.layers().size() {
             let loader = loader.sub(format!("layers.{i}"));
-            let in_ln = load_rmsnorm(dev, &loader.sub("input_layernorm"))?;
-            let post_ln = load_rmsnorm(dev, &loader.sub("post_attention_layernorm"))?;
+            let in_ln = load_rmsnorm(dev, &loader.sub("input_layernorm"), P::RMS_NORM_EPS)?;
+            let post_ln = load_rmsnorm(
+                dev,
+                &loader.sub("post_attention_layernorm"),
+                P::RMS_NORM_EPS,
+            )?;
 
             let k_proj = load_linear(dev, &loader.sub("self_attn.k_proj"))?;
             let q_proj = load_linear(dev, &loader.sub("self_attn.q_proj"))?;
@@ -264,6 +268,7 @@ pub trait Params: Debug + Clone + Copy {
     type Layers: ConstDim;
     const MAX_SEQ_LEN: usize;
     const ROE_BASE: i64;
+    const RMS_NORM_EPS: f64;
 
     fn vocab(&self) -> Self::Vocab;
     fn hidden(&self) -> Self::Hidden;

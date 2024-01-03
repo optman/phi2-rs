@@ -13,8 +13,9 @@ impl Params for ConfigV2 {
     type KvDim = Const<256>;
     type Layers = Const<22>;
 
-    const MAX_SEQ_LEN: usize = 4096;
+    const MAX_SEQ_LEN: usize = 2048;
     const ROE_BASE: i64 = 10000;
+    const RMS_NORM_EPS: f64 = 1e-5;
 
     fn vocab(&self) -> Self::Vocab {
         Self::Vocab {}
