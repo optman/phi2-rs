@@ -170,10 +170,7 @@ pub struct PhiLM<E: Dtype, P: Params, D: Device<E>> {
 }
 
 impl<E: Dtype, P: Params, D: Device<E>> PhiLM<E, P, D> {
-    pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self>
-    where
-        D: Device<f32> + ToDtypeKernel<f32, E>,
-    {
+    pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self> {
         let loader = loader.sub("model");
         let ln = load_rmsnorm(dev, &loader.sub("norm"), P::RMS_NORM_EPS)?;
         let embedding = load_emedding(dev, &loader.sub("embed_tokens"))?;

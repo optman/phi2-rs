@@ -55,20 +55,17 @@ impl SafeTensorLoader {
         &self,
         dev: &D,
         path: &str,
-    ) -> Result<Tensor<S, E, D>>
-    where
-        D: Device<f32> + ToDtypeKernel<f32, E>,
-    {
+    ) -> Result<Tensor<S, E, D>> {
         let mut paths = self.prefixs.clone();
         paths.push(path.to_owned());
         let full_path = paths.join(".");
 
-        let mut t: Tensor<_, f32, _> = dev.zeros();
+        let mut t: Tensor<_, E, _> = dev.zeros();
         let mut err = None;
         for ts in &*self.tensors {
             match load_safetensor_bf16(&mut t, &ts.get().0, &full_path) {
                 Ok(_) => {
-                    return Ok(t.to_dtype::<E>());
+                    return Ok(t);
                 }
                 Err(e @ SafeTensorError::TensorNotFound(_)) => {
                     err = Some(Error::from(e));
