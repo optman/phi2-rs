@@ -57,7 +57,7 @@ impl<RotaryDim: Dim, E: Dtype, D: Device<E>> RotaryEmbedding<RotaryDim, E, D> {
         let sub_sin: Tensor<(Seq, RotaryDim), _, _> = self.sin.clone().gather(idx).realize();
 
         let neg_half_x: Tensor<(Seq, Headers, RotaryDim), _, _> =
-            (first_half.negate(), second_half)
+            (second_half.negate(), first_half)
                 .concat_tensor_along(Axis::<2>)
                 .realize();
 
