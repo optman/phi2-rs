@@ -108,7 +108,10 @@ where
         seq.push(next_idx);
 
         if opt.verbose {
-            print!("{:}", tokenizer.decode(&[next_idx as u32], true).unwrap());
+            if let Some(text) = tokenizer.id_to_token(next_idx as u32) {
+                let text = text.replace('▁', " ").replace("<0x0A>", "\n");
+                print!("{text}");
+            }
             std::io::stdout().flush().unwrap();
         }
 
