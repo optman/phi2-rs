@@ -160,7 +160,7 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
     }
 }
 
-pub struct PhiLM<E: Dtype, P: Params, D: Device<E>> {
+pub struct Mistral<E: Dtype, P: Params, D: Device<E>> {
     embedding: Embedding<P::Vocab, P::Hidden, E, D>,
     blocks: Vec<Block<E, P, D>>,
     ln: RmsNorm<P::Hidden, E, D>,
@@ -169,7 +169,7 @@ pub struct PhiLM<E: Dtype, P: Params, D: Device<E>> {
     p: P,
 }
 
-impl<E: Dtype, P: Params, D: Device<E>> PhiLM<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> Mistral<E, P, D> {
     pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self> {
         let loader = loader.sub("model");
         let ln = load_rmsnorm(dev, &loader.sub("norm"), P::RMS_NORM_EPS)?;

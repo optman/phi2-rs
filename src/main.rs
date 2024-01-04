@@ -3,7 +3,7 @@ use dfdx::prelude::*;
 use rand::prelude::{SeedableRng, StdRng};
 
 mod model;
-use model::PhiLM;
+use model::Mistral;
 
 mod nn_loader;
 
@@ -51,18 +51,10 @@ struct Cli {
     #[arg(long, default_value_t = 1)] //cache_size / seq_len(training)
     pos_scale: usize,
 
-    #[arg(long, default_value_t = 2048)]
+    #[arg(long, default_value_t = 4096)]
     cache_size: usize,
 
-    #[arg(
-        long,
-        short,
-        default_value = "<|system|>
-You are a chatbot who can help code!</s>
-<|user|>
-Write me a function to calculate the first 10 digits of the fibonacci sequence in Python and print it out to the CLI.</s>
-<|assistant|>"
-    )]
+    #[arg(long, short, default_value = "Once upon a time,")]
     prompt: String,
 
     #[arg(long, short)]
@@ -75,7 +67,10 @@ fn main() -> Result<()> {
     let mut rng = StdRng::seed_from_u64(args.seed);
 
     let root = args.model_path;
-    let paths = vec![format!("{root}/model.safetensors")];
+    let paths = vec![
+        format!("{root}/model-00001-of-00002.safetensors"),
+        format!("{root}/model-00002-of-00002.safetensors"),
+    ];
 
     let tokenizer_model = format!("{root}/tokenizer.json");
     let tokenizer = Tokenizer::from_file(tokenizer_model).map_err(anyhow::Error::msg)?;
@@ -88,7 +83,7 @@ fn main() -> Result<()> {
 
     let cfg = ConfigV2 {};
 
-    let m = PhiLM::<f32, _, _>::load_model(cfg, &dev, &loader)?;
+    let m = Mistral::<f32, _, _>::load_model(cfg, &dev, &loader)?;
 
     let gen_opt = GenerateOption {
         use_cache: !args.disable_cache,
