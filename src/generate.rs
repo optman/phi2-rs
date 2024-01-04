@@ -83,20 +83,20 @@ where
             early_break = Some(i);
             break;
         }
-        let probs = y.select(dev.tensor(x_len - 1)).to_dtype::<f32>();
-        let probs = if opt.repeat_penalty == 1.0 {
-            probs
+        let logits = y.select(dev.tensor(x_len - 1)).to_dtype::<f32>();
+        let logits = if opt.repeat_penalty == 1.0 {
+            logits
         } else {
             apply_penalty(
-                probs,
+                logits,
                 opt.repeat_penalty,
                 &seq[seq.len().saturating_sub(opt.repeat_last_n)..],
             )
         };
         let next_idx = if opt.greedy {
-            greedy(probs.as_vec())
+            greedy(logits.as_vec())
         } else {
-            let probs = (probs / opt.temperature).softmax().to_dtype();
+            let probs = (logits / opt.temperature).softmax().to_dtype();
             topk(probs.as_vec(), opt.top_p, opt.top_k, rng)
         };
 
@@ -131,8 +131,8 @@ where
     )
 }
 
-fn greedy<E: PartialOrd + Debug>(probs: Vec<E>) -> usize {
-    probs
+fn greedy<E: PartialOrd + Debug>(logits: Vec<E>) -> usize {
+    logits
         .iter()
         .enumerate()
         .max_by(|x, y| x.1.partial_cmp(y.1).unwrap())
@@ -168,17 +168,17 @@ fn topk(probs: Vec<f32>, top_p: f32, top_k: usize, rng: &mut StdRng) -> usize {
 }
 
 pub fn apply_penalty<S: Shape, D: Device<f32>>(
-    probs: Tensor<S, f32, D>,
+    logits: Tensor<S, f32, D>,
     penalty: f32,
     context: &[usize],
 ) -> Tensor<S, f32, D> {
-    let shape = *probs.shape();
-    let dev = probs.dev();
-    let mut probs = probs.as_vec();
+    let shape = *logits.shape();
+    let dev = logits.dev();
+    let mut logits = logits.as_vec();
 
     let context: HashSet<_> = context.iter().collect();
 
-    for (token_id, p) in probs.iter_mut().enumerate() {
+    for (token_id, p) in logits.iter_mut().enumerate() {
         if context.contains(&token_id) {
             if *p >= 0. {
                 *p /= penalty;
@@ -188,7 +188,7 @@ pub fn apply_penalty<S: Shape, D: Device<f32>>(
         }
     }
 
-    dev.tensor_from_vec(probs, shape)
+    dev.tensor_from_vec(logits, shape)
 }
 
 pub fn print_metrics(elapsed: std::time::Duration, num_tokens_generated: usize) {
