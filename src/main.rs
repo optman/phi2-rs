@@ -40,8 +40,8 @@ struct Cli {
     #[arg(long, default_value_t = 40)]
     top_k: usize,
 
-    #[arg(long, default_value_t = 0.8)]
-    temperature: f32,
+    #[arg(long)]
+    temperature: Option<f32>,
 
     #[arg(long, default_value_t = false)]
     bench: bool,
@@ -90,7 +90,6 @@ fn main() -> Result<()> {
     let gen_opt = GenerateOption {
         use_cache: !args.disable_cache,
         verbose: true,
-        greedy: args.greedy,
         top_k: args.top_k,
         top_p: args.top_p,
         temperature: args.temperature,

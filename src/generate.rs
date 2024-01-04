@@ -9,11 +9,10 @@ use std::{collections::HashSet, fmt::Debug, io::Write};
 use tokenizers::tokenizer::Tokenizer;
 
 pub struct GenerateOption {
-    pub greedy: bool,
     pub use_cache: bool,
     pub top_k: usize,
     pub top_p: f32,
-    pub temperature: f32,
+    pub temperature: Option<f32>,
     pub max_seq_len: usize,
     pub pos_scale: usize,
     pub verbose: bool,
@@ -25,11 +24,10 @@ pub struct GenerateOption {
 impl Default for GenerateOption {
     fn default() -> Self {
         Self {
-            greedy: false,
             use_cache: true,
             top_k: 40,
             top_p: 0.95,
-            temperature: 0.8,
+            temperature: None,
             max_seq_len: 1_000_000,
             pos_scale: 1,
             verbose: false,
@@ -93,11 +91,12 @@ where
                 &seq[seq.len().saturating_sub(opt.repeat_last_n)..],
             )
         };
-        let next_idx = if opt.greedy {
-            greedy(logits.as_vec())
-        } else {
-            let probs = (logits / opt.temperature).softmax().to_dtype();
-            topk(probs.as_vec(), opt.top_p, opt.top_k, rng)
+        let next_idx = match opt.temperature {
+            None => greedy(logits.as_vec()),
+            Some(temperature) => {
+                let probs = (logits / temperature).softmax().to_dtype();
+                topk(probs.as_vec(), opt.top_p, opt.top_k, rng)
+            }
         };
 
         if next_idx as u32 == eos_token {
