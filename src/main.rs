@@ -3,7 +3,7 @@ use dfdx::prelude::*;
 use rand::prelude::{SeedableRng, StdRng};
 
 mod model;
-use model::PhiLM;
+use model::TinyLlama;
 
 mod nn_loader;
 
@@ -88,7 +88,7 @@ fn main() -> Result<()> {
 
     let cfg = ConfigV2 {};
 
-    let m = PhiLM::<f32, _, _>::load_model(cfg, &dev, &loader)?;
+    let m = TinyLlama::<f32, _, _>::load_model(cfg, &dev, &loader)?;
 
     let gen_opt = GenerateOption {
         use_cache: !args.disable_cache,
