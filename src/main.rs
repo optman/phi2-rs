@@ -79,6 +79,8 @@ fn main() -> Result<()> {
 
     let loader = SafeTensorLoader::new(paths.into_iter().map(|f| f.to_owned()).collect())?;
 
+    let eos_token = "<|endoftext|>";
+
     let dev = AutoDevice::default();
 
     let cfg = ConfigV2 {};
@@ -108,6 +110,7 @@ fn main() -> Result<()> {
         &args.prompt,
         args.num_tokens,
         &gen_opt,
+        eos_token,
     );
     if args.bench {
         print_metrics(start.elapsed(), gen_num);

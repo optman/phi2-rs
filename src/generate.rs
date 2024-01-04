@@ -48,6 +48,7 @@ pub fn generate<E: Dtype, P: Params, D: Device<E>>(
     prompt: &str,
     gen_num: usize,
     opt: &GenerateOption,
+    eos_token: &str,
 ) -> (usize, String)
 where
     D: Device<f64> + Device<f32> + Device<f16>,
@@ -57,7 +58,7 @@ where
         std::io::stdout().flush().unwrap();
     }
 
-    let eos_token = *tokenizer.get_vocab(true).get("<|endoftext|>").unwrap();
+    let eos_token = *tokenizer.get_vocab(true).get(eos_token).unwrap();
 
     let prompt = tokenizer.encode(prompt, true).unwrap();
     let mut seq: Vec<usize> = prompt.get_ids().iter().map(|c| *c as usize).collect();
