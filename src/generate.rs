@@ -2,6 +2,7 @@ use crate::{
     cache::Cache,
     model::{Dtype, Mistral, Params},
 };
+use dfdx::dtypes::{f16, AMP};
 use dfdx::prelude::*;
 use rand::{rngs::StdRng, Rng};
 use std::{collections::HashSet, fmt::Debug, io::Write};
@@ -48,7 +49,7 @@ pub fn generate<E: Dtype, P: Params, D: Device<E>>(
     eos_token: &str,
 ) -> (usize, String)
 where
-    D: Device<f32>,
+    D: Device<f32> + Device<AMP<f16>> + ToDtypeKernel<AMP<f16>, E> + ToDtypeKernel<E, AMP<f16>>,
 {
     if opt.verbose {
         print!("{:}", prompt);

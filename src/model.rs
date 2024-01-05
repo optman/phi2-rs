@@ -7,6 +7,7 @@ use anyhow::Result;
 use dfdx::dtypes::{f16, AMP};
 use dfdx::prelude::*;
 use std::fmt::Debug;
+use std::marker::PhantomData;
 
 pub trait Dtype: dfdx::prelude::Dtype + num_traits::Float {}
 impl Dtype for f32 {}
@@ -14,15 +15,22 @@ impl Dtype for f16 {}
 impl Dtype for AMP<f16> {}
 
 #[allow(clippy::upper_case_acronyms)]
-struct MHA<E: Dtype, P: Params, D: Device<E>> {
-    k_proj: Linear<P::Hidden, P::KvDim, E, D>,
-    q_proj: Linear<P::Hidden, P::Hidden, E, D>,
-    v_proj: Linear<P::Hidden, P::KvDim, E, D>,
-    o_proj: Linear<P::Hidden, P::Hidden, E, D>,
+struct MHA<E: Dtype, P: Params, D: Device<E>>
+where
+    D: Device<AMP<f16>>,
+{
+    k_proj: Linear<P::Hidden, P::KvDim, AMP<f16>, D>,
+    q_proj: Linear<P::Hidden, P::Hidden, AMP<f16>, D>,
+    v_proj: Linear<P::Hidden, P::KvDim, AMP<f16>, D>,
+    o_proj: Linear<P::Hidden, P::Hidden, AMP<f16>, D>,
     p: P,
+    _e: PhantomData<E>,
 }
 #[allow(clippy::type_complexity)]
-impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D>
+where
+    D: Device<AMP<f16>> + ToDtypeKernel<AMP<f16>, E> + ToDtypeKernel<E, AMP<f16>>,
+{
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -40,11 +48,13 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
         ),
         Error,
     > {
+        let x = x.to_dtype();
+
         let dev = x.dev().clone();
         let (seq, hidden) = *x.shape();
-        let q = self.q_proj.try_forward(x.clone())?;
-        let k = self.k_proj.try_forward(x.clone())?;
-        let v = self.v_proj.try_forward(x)?;
+        let q = self.q_proj.try_forward(x.clone())?.to_dtype();
+        let k = self.k_proj.try_forward(x.clone())?.to_dtype();
+        let v = self.v_proj.try_forward(x)?.to_dtype();
 
         let qs = (seq.size(), self.p.heads(), self.p.head_dim());
         let q = pos_enc.try_forward(q.reshape_like(&qs), pos, pos_scale)?;
@@ -97,8 +107,8 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
             .try_reshape_like(&(seq, hidden))?
             .realize();
 
-        let out = self.o_proj.try_forward(v)?;
-        Ok((out, cache, Some(mask)))
+        let out = self.o_proj.try_forward(v.to_dtype())?;
+        Ok((out.to_dtype(), cache, Some(mask)))
     }
 }
 
@@ -120,15 +130,21 @@ impl<E: Dtype, P: Params, D: Device<E>> MLP<E, P, D> {
         Ok(y)
     }
 }
-struct Block<E: Dtype, P: Params, D: Device<E>> {
+struct Block<E: Dtype, P: Params, D: Device<E>>
+where
+    D: Device<AMP<f16>>,
+{
     rms_1: RmsNorm<P::Hidden, E, D>,
     rms_2: RmsNorm<P::Hidden, E, D>,
     mha: MHA<E, P, D>,
-    mlp: MLP<E, P, D>,
+    mlp: MLP<AMP<f16>, P, D>,
 }
 
 #[allow(clippy::type_complexity)]
-impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
+where
+    D: Device<AMP<f16>> + ToDtypeKernel<E, AMP<f16>> + ToDtypeKernel<AMP<f16>, E>,
+{
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -155,21 +171,29 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
         )?;
         let x = attn_out + residual;
         let residual = x.clone();
-        let mlp_out = self.mlp.try_forward(self.rms_2.try_forward(x)?)?;
-        Ok((residual + mlp_out, cache, mask))
+        let mlp_out = self
+            .mlp
+            .try_forward(self.rms_2.try_forward(x)?.to_dtype())?;
+        Ok((residual + mlp_out.to_dtype(), cache, mask))
     }
 }
 
-pub struct Mistral<E: Dtype, P: Params, D: Device<E>> {
-    embedding: Embedding<P::Vocab, P::Hidden, E, D>,
+pub struct Mistral<E: Dtype, P: Params, D: Device<E>>
+where
+    D: Device<AMP<f16>>,
+{
+    embedding: Embedding<P::Vocab, P::Hidden, AMP<f16>, D>,
     blocks: Vec<Block<E, P, D>>,
     ln: RmsNorm<P::Hidden, E, D>,
-    lm: Linear<P::Hidden, P::Vocab, E, D>,
+    lm: Linear<P::Hidden, P::Vocab, AMP<f16>, D>,
     pos_enc: RotaryEmbedding<P::HeadDim, E, D>,
     p: P,
 }
 
-impl<E: Dtype, P: Params, D: Device<E>> Mistral<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> Mistral<E, P, D>
+where
+    D: Device<AMP<f16>> + ToDtypeKernel<AMP<f16>, E> + ToDtypeKernel<E, AMP<f16>>,
+{
     pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self> {
         let loader = loader.sub("model");
         let ln = load_rmsnorm(dev, &loader.sub("norm"), P::RMS_NORM_EPS)?;
@@ -204,6 +228,7 @@ impl<E: Dtype, P: Params, D: Device<E>> Mistral<E, P, D> {
                     v_proj,
                     o_proj,
                     p,
+                    _e: PhantomData,
                 },
                 mlp: MLP {
                     fc1: gate_proj,
@@ -239,14 +264,14 @@ impl<E: Dtype, P: Params, D: Device<E>> Mistral<E, P, D> {
         Tensor<(Seq, P::Vocab), E, D>,
         Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
     )> {
-        let mut x = self.embedding.try_forward(x)?;
+        let mut x = self.embedding.try_forward(x)?.to_dtype();
         let mut mask = None;
         for (i, b) in self.blocks.iter().enumerate() {
             (x, cache, mask) = b.try_forward(x, i, pos, pos_scale, &self.pos_enc, cache, mask)?;
         }
         let x = self.ln.try_forward(x)?;
-        let x = self.lm.try_forward(x)?;
-        Ok((x, cache))
+        let x = self.lm.try_forward(x.to_dtype())?;
+        Ok((x.to_dtype(), cache))
     }
 
     pub fn params(&self) -> &P {
