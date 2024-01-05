@@ -59,6 +59,9 @@ struct Cli {
 
     #[arg(long, short)]
     model_path: String,
+
+    #[arg(long, default_value_t = 16)]
+    split: usize,
 }
 
 fn main() -> Result<()> {
@@ -80,10 +83,11 @@ fn main() -> Result<()> {
     let eos_token = "</s>";
 
     let dev = AutoDevice::default();
+    let dev2 = Cpu::default();
 
     let cfg = ConfigV2 {};
 
-    let m = Mistral::<f32, _, _>::load_model(cfg, &dev, &loader)?;
+    let m = Mistral::<f32, _, _, _>::load_model(cfg, &dev, &dev2, &loader, args.split)?;
 
     let gen_opt = GenerateOption {
         use_cache: !args.disable_cache,
@@ -103,6 +107,7 @@ fn main() -> Result<()> {
         &tokenizer,
         &mut rng,
         &dev,
+        &dev2,
         &m,
         &args.prompt,
         args.num_tokens,

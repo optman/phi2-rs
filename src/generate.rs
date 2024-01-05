@@ -37,11 +37,12 @@ impl Default for GenerateOption {
     }
 }
 
-pub fn generate<E: Dtype, P: Params, D: Device<E>>(
+pub fn generate<E: Dtype, P: Params, D: Device<E>, D2: Device<E>>(
     tokenizer: &Tokenizer,
     rng: &mut StdRng,
     dev: &D,
-    m: &Mistral<E, P, D>,
+    _dev2: &D2,
+    m: &Mistral<E, P, D, D2>,
     prompt: &str,
     gen_num: usize,
     opt: &GenerateOption,
