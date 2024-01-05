@@ -17,19 +17,19 @@ impl Dtype for AMP<f16> {}
 #[allow(clippy::upper_case_acronyms)]
 struct MHA<E: Dtype, P: Params, D: Device<E>>
 where
-    D: Device<AMP<f16>>,
+    D: Device<f16>,
 {
-    k_proj: Linear<P::Hidden, P::KvDim, AMP<f16>, D>,
-    q_proj: Linear<P::Hidden, P::Hidden, AMP<f16>, D>,
-    v_proj: Linear<P::Hidden, P::KvDim, AMP<f16>, D>,
-    o_proj: Linear<P::Hidden, P::Hidden, AMP<f16>, D>,
+    k_proj: Linear<P::Hidden, P::KvDim, f16, D>,
+    q_proj: Linear<P::Hidden, P::Hidden, f16, D>,
+    v_proj: Linear<P::Hidden, P::KvDim, f16, D>,
+    o_proj: Linear<P::Hidden, P::Hidden, f16, D>,
     p: P,
     _e: PhantomData<E>,
 }
 #[allow(clippy::type_complexity)]
 impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D>
 where
-    D: Device<AMP<f16>> + ToDtypeKernel<AMP<f16>, E> + ToDtypeKernel<E, AMP<f16>>,
+    D: Device<f16> + ToDtypeKernel<f16, E> + ToDtypeKernel<E, f16>,
 {
     pub fn try_forward<Seq: Dim>(
         &self,
@@ -132,18 +132,18 @@ impl<E: Dtype, P: Params, D: Device<E>> MLP<E, P, D> {
 }
 struct Block<E: Dtype, P: Params, D: Device<E>>
 where
-    D: Device<AMP<f16>>,
+    D: Device<f16>,
 {
     rms_1: RmsNorm<P::Hidden, E, D>,
     rms_2: RmsNorm<P::Hidden, E, D>,
     mha: MHA<E, P, D>,
-    mlp: MLP<AMP<f16>, P, D>,
+    mlp: MLP<f16, P, D>,
 }
 
 #[allow(clippy::type_complexity)]
 impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
 where
-    D: Device<AMP<f16>> + ToDtypeKernel<E, AMP<f16>> + ToDtypeKernel<AMP<f16>, E>,
+    D: Device<f16> + ToDtypeKernel<E, f16> + ToDtypeKernel<f16, E>,
 {
     pub fn try_forward<Seq: Dim>(
         &self,
@@ -180,19 +180,19 @@ where
 
 pub struct Mistral<E: Dtype, P: Params, D: Device<E>>
 where
-    D: Device<AMP<f16>>,
+    D: Device<f16>,
 {
-    embedding: Embedding<P::Vocab, P::Hidden, AMP<f16>, D>,
+    embedding: Embedding<P::Vocab, P::Hidden, f16, D>,
     blocks: Vec<Block<E, P, D>>,
     ln: RmsNorm<P::Hidden, E, D>,
-    lm: Linear<P::Hidden, P::Vocab, AMP<f16>, D>,
+    lm: Linear<P::Hidden, P::Vocab, f16, D>,
     pos_enc: RotaryEmbedding<P::HeadDim, E, D>,
     p: P,
 }
 
 impl<E: Dtype, P: Params, D: Device<E>> Mistral<E, P, D>
 where
-    D: Device<AMP<f16>> + ToDtypeKernel<AMP<f16>, E> + ToDtypeKernel<E, AMP<f16>>,
+    D: Device<f16> + ToDtypeKernel<f16, E> + ToDtypeKernel<E, f16>,
 {
     pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self> {
         let loader = loader.sub("model");
