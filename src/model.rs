@@ -120,15 +120,21 @@ impl<E: Dtype, P: Params, D: Device<E>> MLP<E, P, D> {
         Ok(y)
     }
 }
-struct Block<E: Dtype, P: Params, D: Device<E>> {
-    rms_1: RmsNorm<P::Hidden, E, D>,
-    rms_2: RmsNorm<P::Hidden, E, D>,
+struct Block<E: Dtype, P: Params, D: Device<E>>
+where
+    D: Device<f32>,
+{
+    rms_1: RmsNorm<P::Hidden, f32, D>,
+    rms_2: RmsNorm<P::Hidden, f32, D>,
     mha: MHA<E, P, D>,
     mlp: MLP<E, P, D>,
 }
 
 #[allow(clippy::type_complexity)]
-impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
+where
+    D: Device<f32> + ToDtypeKernel<E, f32> + ToDtypeKernel<f32, E>,
+{
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -145,7 +151,7 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
     )> {
         let residual = x.clone();
         let (attn_out, cache, mask) = self.mha.try_forward(
-            self.rms_1.try_forward(x.clone())?,
+            self.rms_1.try_forward(x.clone().to_dtype())?.to_dtype(),
             layer,
             pos,
             pos_scale,
@@ -155,21 +161,29 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
         )?;
         let x = attn_out + residual;
         let residual = x.clone();
-        let mlp_out = self.mlp.try_forward(self.rms_2.try_forward(x)?)?;
+        let mlp_out = self
+            .mlp
+            .try_forward(self.rms_2.try_forward(x.to_dtype())?.to_dtype())?;
         Ok((residual + mlp_out, cache, mask))
     }
 }
 
-pub struct TinyLlama<E: Dtype, P: Params, D: Device<E>> {
+pub struct TinyLlama<E: Dtype, P: Params, D: Device<E>>
+where
+    D: Device<f32>,
+{
     embedding: Embedding<P::Vocab, P::Hidden, E, D>,
     blocks: Vec<Block<E, P, D>>,
-    ln: RmsNorm<P::Hidden, E, D>,
+    ln: RmsNorm<P::Hidden, f32, D>,
     lm: Linear<P::Hidden, P::Vocab, E, D>,
     pos_enc: RotaryEmbedding<P::HeadDim, E, D>,
     p: P,
 }
 
-impl<E: Dtype, P: Params, D: Device<E>> TinyLlama<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> TinyLlama<E, P, D>
+where
+    D: Device<f32>,
+{
     pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self> {
         let loader = loader.sub("model");
         let ln = load_rmsnorm(dev, &loader.sub("norm"), P::RMS_NORM_EPS)?;
@@ -238,14 +252,17 @@ impl<E: Dtype, P: Params, D: Device<E>> TinyLlama<E, P, D> {
     ) -> Result<(
         Tensor<(Seq, P::Vocab), E, D>,
         Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-    )> {
+    )>
+    where
+        D: ToDtypeKernel<f16, E> + ToDtypeKernel<E, f16>,
+    {
         let mut x = self.embedding.try_forward(x)?;
         let mut mask = None;
         for (i, b) in self.blocks.iter().enumerate() {
             (x, cache, mask) = b.try_forward(x, i, pos, pos_scale, &self.pos_enc, cache, mask)?;
         }
-        let x = self.ln.try_forward(x)?;
-        let x = self.lm.try_forward(x)?;
+        let x = self.ln.try_forward(x.to_dtype())?;
+        let x = self.lm.try_forward(x.to_dtype())?;
         Ok((x, cache))
     }
 
