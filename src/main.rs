@@ -34,9 +34,6 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     disable_cache: bool,
 
-    #[arg(long, default_value_t = false)]
-    greedy: bool,
-
     #[arg(long, default_value_t = 0.95)]
     top_p: f32,
 
