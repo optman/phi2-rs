@@ -5,6 +5,7 @@ use crate::tensor_loader::SafeTensorLoader;
 use anyhow::Result;
 use dfdx::dtypes::{f16, AMP};
 use dfdx::prelude::*;
+use num_traits::Float;
 use std::fmt::Debug;
 
 pub trait Dtype: dfdx::prelude::Dtype + num_traits::Float {}
@@ -19,7 +20,10 @@ struct MHA<E: Dtype, P: Params, D: Device<E>> {
     p: P,
 }
 #[allow(clippy::type_complexity)]
-impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D>
+where
+    D: Device<f32> + ToDtypeKernel<E, f32> + ToDtypeKernel<f32, E>,
+{
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -28,12 +32,12 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
         pos_scale: usize,
         pos_enc: &RotaryEmbedding<P::RoeDim, E, D>,
         mut cache: Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
-        mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
+        mask: Option<Tensor<(P::Heads, usize, usize), f32, D>>,
     ) -> Result<
         (
             Tensor<(Seq, P::Hidden), E, D>,
             Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
-            Option<Tensor<(P::Heads, usize, usize), E, D>>,
+            Option<Tensor<(P::Heads, usize, usize), f32, D>>,
         ),
         Error,
     > {
@@ -74,9 +78,9 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
         let (kv_seq, _headers, _header_dim) = k.shape().concrete().into();
 
         //(seq, header, header_dim) -> (headers, seq, header_dim)
-        let q = q.permute::<_, Axes3<1, 0, 2>>();
-        let k = k.permute::<_, Axes3<1, 0, 2>>();
-        let v = v.permute::<_, Axes3<1, 0, 2>>();
+        let q = q.permute::<_, Axes3<1, 0, 2>>().to_dtype::<f32>();
+        let k = k.permute::<_, Axes3<1, 0, 2>>().to_dtype::<f32>();
+        let v = v.permute::<_, Axes3<1, 0, 2>>().to_dtype::<f32>();
 
         let scale = (self.p.head_dim().size() as f64).sqrt().recip();
         let mut att = q.matmul(k.permute::<_, Axes3<0, 2, 1>>()) * scale;
@@ -85,12 +89,13 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
             Some(mask) => mask,
             None => {
                 let attn_seq = kv_seq;
-                let mask = dev.upper_tri_like(&(attn_seq, attn_seq), E::neg_infinity(), 1);
+                let mask = dev.upper_tri_like(&(attn_seq, attn_seq), f32::neg_infinity(), 1);
                 let sub_mask_sel = ((attn_seq - seq.size())..attn_seq).collect();
                 let sub_mask_sel = dev.tensor_from_vec(sub_mask_sel, (seq.size(),));
                 mask.gather(sub_mask_sel).broadcast_like(&att).realize()
             }
         };
+
         att = mask.clone() + att;
 
         let att = att.softmax::<Axis<2>>();
@@ -102,7 +107,7 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
             .try_reshape_like(&(seq, hidden))?
             .realize();
 
-        let out = self.out_proj.try_forward(v)?;
+        let out = self.out_proj.try_forward(v.to_dtype())?;
         Ok((out, cache, Some(mask)))
     }
 }
@@ -123,14 +128,20 @@ impl<E: Dtype, P: Params, D: Device<E>> MLP<E, P, D> {
         Ok(x)
     }
 }
-struct Block<E: Dtype, P: Params, D: Device<E>> {
-    ln: LayerNorm1D<P::Hidden, E, D>,
+struct Block<E: Dtype, P: Params, D: Device<E>>
+where
+    D: Device<f32>,
+{
+    ln: LayerNorm1D<P::Hidden, f32, D>,
     mha: MHA<E, P, D>,
     mlp: MLP<E, P, D>,
 }
 
 #[allow(clippy::type_complexity)]
-impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
+where
+    D: Device<f32> + ToDtypeKernel<E, f32> + ToDtypeKernel<f32, E>,
+{
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -139,14 +150,14 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
         pos_scale: usize,
         pos_enc: &RotaryEmbedding<P::RoeDim, E, D>,
         cache: Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
-        mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
+        mask: Option<Tensor<(P::Heads, usize, usize), f32, D>>,
     ) -> Result<(
         Tensor<(Seq, P::Hidden), E, D>,
         Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
-        Option<Tensor<(P::Heads, usize, usize), E, D>>,
+        Option<Tensor<(P::Heads, usize, usize), f32, D>>,
     )> {
         let residual = x.clone();
-        let x = self.ln.try_forward(x)?;
+        let x = self.ln.try_forward(x.to_dtype())?.to_dtype();
         let (attn_out, cache, mask) =
             self.mha
                 .try_forward(x.clone(), layer, pos, pos_scale, pos_enc, cache, mask)?;
@@ -155,16 +166,22 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
     }
 }
 
-pub struct PhiLM<E: Dtype, P: Params, D: Device<E>> {
+pub struct PhiLM<E: Dtype, P: Params, D: Device<E>>
+where
+    D: Device<f32>,
+{
     embedding: Embedding<P::Vocab, P::Hidden, E, D>,
     blocks: Vec<Block<E, P, D>>,
-    lm_ln: LayerNorm1D<P::Hidden, E, D>,
+    lm_ln: LayerNorm1D<P::Hidden, f32, D>,
     lm_linear: Linear<P::Hidden, P::Vocab, E, D>,
     pos_enc: RotaryEmbedding<P::RoeDim, E, D>,
     p: P,
 }
 
-impl<E: Dtype, P: Params, D: Device<E>> PhiLM<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> PhiLM<E, P, D>
+where
+    D: Device<f32>,
+{
     pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self>
     where
         D: Device<f16> + ToDtypeKernel<f16, E>,
@@ -215,13 +232,16 @@ impl<E: Dtype, P: Params, D: Device<E>> PhiLM<E, P, D> {
     ) -> Result<(
         Tensor<(Seq, P::Vocab), E, D>,
         Option<Cache<P::Heads, P::HeadDim, P::Layers, E, D>>,
-    )> {
+    )>
+    where
+        D: Device<f32> + ToDtypeKernel<E, f32> + ToDtypeKernel<f32, E>,
+    {
         let mut x = self.embedding.try_forward(x)?;
         let mut mask = None;
         for (i, b) in self.blocks.iter().enumerate() {
             (x, cache, mask) = b.try_forward(x, i, pos, pos_scale, &self.pos_enc, cache, mask)?;
         }
-        let x = self.lm_ln.try_forward(x)?;
+        let x = self.lm_ln.try_forward(x.to_dtype())?.to_dtype();
         let x = self.lm_linear.try_forward(x)?;
         Ok((x, cache))
     }

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use dfdx::dtypes::f16;
 use dfdx::prelude::*;
 use rand::prelude::{SeedableRng, StdRng};
 
@@ -82,7 +83,7 @@ fn main() -> Result<()> {
 
     let cfg = ConfigV2 {};
 
-    let m = PhiLM::<f32, _, _>::load_model(cfg, &dev, &loader)?;
+    let m = PhiLM::<f16, _, _>::load_model(cfg, &dev, &loader)?;
 
     let gen_opt = GenerateOption {
         use_cache: !args.disable_cache,
