@@ -92,7 +92,6 @@ fn main() -> Result<()> {
         top_k: args.top_k,
         top_p: args.top_p,
         temperature: args.temperature,
-        max_seq_len: args.num_tokens,
         pos_scale: args.pos_scale,
         cache_size: args.cache_size,
         ..Default::default()
