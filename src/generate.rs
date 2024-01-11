@@ -49,7 +49,8 @@ pub fn generate<E: Dtype, P: Params, D: Device<E>, D2: Device<E>>(
     eos_token: &str,
 ) -> (usize, String)
 where
-    D: Device<f32>,
+    D: Device<f32> + ToDtypeKernel<E, f32> + ToDtypeKernel<f32, E>,
+    D2: Device<f32> + ToDtypeKernel<E, f32> + ToDtypeKernel<f32, E>,
 {
     if opt.verbose {
         print!("{:}", prompt);
@@ -66,14 +67,17 @@ where
     let x = dev.tensor_from_vec(seq.clone(), (seq_len,));
 
     let cache = if opt.use_cache {
-        Some(Cache::new(m.params().layers(), opt.cache_size))
+        (
+            Some(Cache::new(m.params().layers(), opt.cache_size)),
+            Some(Cache::new(m.params().layers(), opt.cache_size)),
+        )
     } else {
-        None
+        (None, None)
     };
 
     let mut x_len = seq_len;
     let (mut y, mut cache) = m.try_forward(x, pos, opt.pos_scale, cache).unwrap();
-    pos += if cache.is_some() { x_len } else { 0 };
+    pos += if cache.0.is_some() { x_len } else { 0 };
 
     let mut early_break = None;
     for i in 0..gen_num {
@@ -115,7 +119,7 @@ where
         }
 
         //next round
-        let (x, pos_inc) = if cache.is_some() {
+        let (x, pos_inc) = if cache.0.is_some() {
             (dev.tensor_from_vec(vec![next_idx], (1,)), 1)
         } else {
             (dev.tensor_from_vec(seq.clone(), (seq.len(),)), 0)

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use dfdx::dtypes::f16;
 use dfdx::prelude::*;
 use rand::prelude::{SeedableRng, StdRng};
 
@@ -84,7 +85,7 @@ fn main() -> Result<()> {
 
     let cfg = ConfigV2 {};
 
-    let m = Mistral::<f32, _, _, _>::load_model(cfg, &dev, &dev2, &loader, args.split)?;
+    let m = Mistral::<f16, _, _, _>::load_model(cfg, &dev, &dev2, &loader, args.split)?;
 
     let gen_opt = GenerateOption {
         use_cache: !args.disable_cache,

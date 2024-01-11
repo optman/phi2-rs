@@ -23,29 +23,28 @@ struct MHA<E: Dtype, P: Params, D: Device<E>> {
 }
 #[allow(clippy::type_complexity)]
 impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
-    pub fn try_forward<Seq: Dim, D1: Device<E>>(
+    pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
         layer: usize,
         pos: usize,
         pos_scale: usize,
-        pos_enc: &RotaryEmbedding<P::HeadDim, E, D1>,
-        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D1>>,
-        mask: Option<Tensor<(P::Heads, usize, usize), E, D1>>,
+        pos_enc: &RotaryEmbedding<P::HeadDim, E, D>,
+        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
+        mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
     ) -> Result<
         (
             Tensor<(Seq, P::Hidden), E, D>,
-            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D1>>,
-            Option<Tensor<(P::Heads, usize, usize), E, D1>>,
+            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
+            Option<Tensor<(P::Heads, usize, usize), E, D>>,
         ),
         Error,
     > {
         let dev = x.dev().clone();
-        let dev1 = D1::default();
         let (seq, hidden) = *x.shape();
-        let q = self.q_proj.try_forward(x.clone())?.to_device(&dev1);
-        let k = self.k_proj.try_forward(x.clone())?.to_device(&dev1);
-        let v = self.v_proj.try_forward(x)?.to_device(&dev1);
+        let q = self.q_proj.try_forward(x.clone())?;
+        let k = self.k_proj.try_forward(x.clone())?;
+        let v = self.v_proj.try_forward(x)?;
 
         let qs = (seq.size(), self.p.heads(), self.p.head_dim());
         let q = pos_enc.try_forward(q.reshape_like(&qs), pos, pos_scale)?;
@@ -82,9 +81,9 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
             Some(mask) => mask,
             None => {
                 let attn_seq = kv_seq;
-                let mask = dev1.upper_tri_like(&(attn_seq, attn_seq), E::neg_infinity(), 1);
+                let mask = dev.upper_tri_like(&(attn_seq, attn_seq), E::neg_infinity(), 1);
                 let sub_mask_sel = ((attn_seq - seq.size())..attn_seq).collect();
-                let sub_mask_sel = dev1.tensor_from_vec(sub_mask_sel, (seq.size(),));
+                let sub_mask_sel = dev.tensor_from_vec(sub_mask_sel, (seq.size(),));
                 mask.gather(sub_mask_sel).broadcast_like(&att).realize()
             }
         };
@@ -98,7 +97,7 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
             .try_reshape_like(&(seq, hidden))?
             .realize();
 
-        let out = self.o_proj.try_forward(v.to_device(&dev))?;
+        let out = self.o_proj.try_forward(v)?;
 
         Ok((out, cache, Some(mask)))
     }
@@ -122,32 +121,38 @@ impl<E: Dtype, P: Params, D: Device<E>> MLP<E, P, D> {
         Ok(y)
     }
 }
-struct Block<E: Dtype, P: Params, D: Device<E>> {
-    rms_1: RmsNorm<P::Hidden, E, D>,
-    rms_2: RmsNorm<P::Hidden, E, D>,
+struct Block<E: Dtype, P: Params, D: Device<E>>
+where
+    D: Device<f32>,
+{
+    rms_1: RmsNorm<P::Hidden, f32, D>,
+    rms_2: RmsNorm<P::Hidden, f32, D>,
     mha: MHA<E, P, D>,
     mlp: MLP<E, P, D>,
 }
 
 #[allow(clippy::type_complexity)]
-impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
-    pub fn try_forward<Seq: Dim, D1: Device<E>>(
+impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
+where
+    D: Device<f32>,
+{
+    pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
         layer: usize,
         pos: usize,
         pos_scale: usize,
-        pos_enc: &RotaryEmbedding<P::HeadDim, E, D1>,
-        cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D1>>,
-        mask: Option<Tensor<(P::Heads, usize, usize), E, D1>>,
+        pos_enc: &RotaryEmbedding<P::HeadDim, E, D>,
+        cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
+        mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
     ) -> Result<(
         Tensor<(Seq, P::Hidden), E, D>,
-        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D1>>,
-        Option<Tensor<(P::Heads, usize, usize), E, D1>>,
+        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
+        Option<Tensor<(P::Heads, usize, usize), E, D>>,
     )> {
         let residual = x.clone();
         let (attn_out, cache, mask) = self.mha.try_forward(
-            self.rms_1.try_forward(x.clone())?,
+            self.rms_1.try_forward(x.clone().to_dtype())?.to_dtype(),
             layer,
             pos,
             pos_scale,
@@ -157,17 +162,24 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D> {
         )?;
         let x = attn_out + residual;
         let residual = x.clone();
-        let mlp_out = self.mlp.try_forward(self.rms_2.try_forward(x)?)?;
+        let mlp_out = self
+            .mlp
+            .try_forward(self.rms_2.try_forward(x.to_dtype())?.to_dtype())?;
         Ok((residual + mlp_out, cache, mask))
     }
 }
 
-pub struct Mistral<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>> {
+pub struct Mistral<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>>
+where
+    D1: Device<f32>,
+    D2: Device<f32>,
+{
     embedding: Embedding<P::Vocab, P::Hidden, E, D1>,
-    pos_enc: RotaryEmbedding<P::HeadDim, E, D1>,
+    pos_enc1: RotaryEmbedding<P::HeadDim, E, D1>,
+    pos_enc2: RotaryEmbedding<P::HeadDim, E, D2>,
     blocks1: Vec<Block<E, P, D1>>,
     blocks2: Vec<Block<E, P, D2>>,
-    ln: RmsNorm<P::Hidden, E, D1>,
+    ln: RmsNorm<P::Hidden, f32, D1>,
     lm: Linear<P::Hidden, P::Vocab, E, D1>,
     p: P,
 }
@@ -177,7 +189,10 @@ fn load_block<E: Dtype, P: Params, D: Device<E>>(
     p: P,
     dev: &D,
     loader: &SafeTensorLoader,
-) -> Result<Block<E, P, D>> {
+) -> Result<Block<E, P, D>>
+where
+    D: Device<f32>,
+{
     let loader = loader.sub(format!("layers.{i}"));
     let in_ln = load_rmsnorm(dev, &loader.sub("input_layernorm"), P::RMS_NORM_EPS)?;
     let post_ln = load_rmsnorm(
@@ -212,7 +227,11 @@ fn load_block<E: Dtype, P: Params, D: Device<E>>(
         },
     })
 }
-impl<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>> Mistral<E, P, D1, D2> {
+impl<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>> Mistral<E, P, D1, D2>
+where
+    D1: Device<f32>,
+    D2: Device<f32>,
+{
     pub fn load_model(
         p: P,
         dev: &D1,
@@ -234,7 +253,8 @@ impl<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>> Mistral<E, P, D1, D2> {
             blocks2.push(load_block(i, p, dev2, &loader)?);
         }
 
-        let pos_enc = RotaryEmbedding::new(dev, p.head_dim(), P::MAX_SEQ_LEN, P::ROE_BASE);
+        let pos_enc1 = RotaryEmbedding::new(dev, p.head_dim(), P::MAX_SEQ_LEN, P::ROE_BASE);
+        let pos_enc2 = RotaryEmbedding::new(dev2, p.head_dim(), P::MAX_SEQ_LEN, P::ROE_BASE);
 
         let loader = loader.root();
         let ln = load_rmsnorm(dev, &loader.sub("model.norm"), P::RMS_NORM_EPS)?;
@@ -246,7 +266,8 @@ impl<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>> Mistral<E, P, D1, D2> {
             blocks2,
             ln,
             lm,
-            pos_enc,
+            pos_enc1,
+            pos_enc2,
             p,
         })
     }
@@ -257,30 +278,44 @@ impl<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>> Mistral<E, P, D1, D2> {
         x: Tensor<(Seq,), usize, D1>,
         pos: usize,
         pos_scale: usize,
-        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D1>>,
+        cache: (
+            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D1>>,
+            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D2>>,
+        ),
     ) -> Result<(
         Tensor<(Seq, P::Vocab), E, D1>,
-        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D1>>,
+        (
+            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D1>>,
+            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D2>>,
+        ),
     )> {
         let dev = x.dev().clone();
         let mut x = self.embedding.try_forward(x)?;
-        let mut mask = None;
+        let (mut cache1, mut cache2) = cache;
+        let mut mask1 = None;
         for (i, b) in self.blocks1.iter().enumerate() {
-            (x, cache, mask) = b.try_forward(x, i, pos, pos_scale, &self.pos_enc, cache, mask)?;
+            (x, cache1, mask1) =
+                b.try_forward(x, i, pos, pos_scale, &self.pos_enc1, cache1, mask1)?;
         }
 
-        let mut x = x.to_device(&D2::default());
+        let x = if self.blocks2.len() > 0 {
+            let mut x = x.to_device(&D2::default());
 
-        let base = self.blocks1.len();
-        for (i, b) in self.blocks2.iter().enumerate() {
-            (x, cache, mask) =
-                b.try_forward(x, base + i, pos, pos_scale, &self.pos_enc, cache, mask)?;
-        }
+            let mut mask2 = None;
+            let base = self.blocks1.len();
+            for (i, b) in self.blocks2.iter().enumerate() {
+                (x, cache2, mask2) =
+                    b.try_forward(x, base + i, pos, pos_scale, &self.pos_enc2, cache2, mask2)?;
+            }
 
-        let x = x.to_device(&dev);
-        let x = self.ln.try_forward(x)?;
+            x.to_device(&dev)
+        } else {
+            x
+        };
+
+        let x = self.ln.try_forward(x.to_dtype())?.to_dtype();
         let x = self.lm.try_forward(x)?;
-        Ok((x, cache))
+        Ok((x, (cache1, cache2)))
     }
 
     pub fn params(&self) -> &P {
