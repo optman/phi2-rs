@@ -102,23 +102,70 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
         Ok((out, cache, Some(mask)))
     }
 }
-
-#[allow(clippy::upper_case_acronyms)]
-struct MLP<E: Dtype, P: Params, D: Device<E>> {
-    fc1: Linear<P::Hidden, P::MlpDim, E, D>,
-    fc2: Linear<P::Hidden, P::MlpDim, E, D>,
-    proj: Linear<P::MlpDim, P::Hidden, E, D>,
+struct Expert<E: Dtype, P: Params, D: Device<E>> {
+    w1: Linear<P::Hidden, P::MlpDim, E, D>,
+    w2: Linear<P::MlpDim, P::Hidden, E, D>,
+    w3: Linear<P::Hidden, P::MlpDim, E, D>,
 }
-impl<E: Dtype, P: Params, D: Device<E>> MLP<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> Expert<E, P, D> {
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
     ) -> Result<Tensor<(Seq, P::Hidden), E, D>> {
-        let y1 = self.fc1.try_forward(x.clone())?;
+        let y1 = self.w1.try_forward(x.clone())?;
         let y1 = y1.clone().sigmoid() * y1;
-        let y2 = self.fc2.try_forward(x)?;
-        let y = self.proj.try_forward(y1 * y2)?;
+        let y2 = self.w3.try_forward(x)?;
+        let y = self.w2.try_forward(y1 * y2)?;
         Ok(y)
+    }
+}
+
+struct SpareMoeBlock<E: Dtype, P: Params, D: Device<E>> {
+    gate: Linear<P::Hidden, P::GateDim, E, D>,
+    experts: Vec<Expert<E, P, D>>,
+}
+impl<E: Dtype, P: Params, D: Device<E>> SpareMoeBlock<E, P, D> {
+    pub fn try_forward<Seq: Dim>(
+        &self,
+        x: Tensor<(Seq, P::Hidden), E, D>,
+    ) -> Result<Tensor<(Seq, P::Hidden), E, D>> {
+        let weights = self.gate.try_forward(x.clone())?;
+        let (seq_len, loc_exp) = *weights.shape();
+        let weights = weights.softmax::<Axis<1>>().as_vec();
+        let dev = x.dev();
+        let hidden = x.shape().1;
+
+        let mut result = Vec::new();
+
+        for seq in 0..seq_len.size() {
+            let weights = weights
+                .iter()
+                .skip(seq * loc_exp.size())
+                .take(loc_exp.size());
+            let mut idx_w = weights.enumerate().collect::<Vec<(usize, &E)>>();
+            idx_w.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap());
+
+            let x = x.clone().gather(dev.tensor([seq]));
+
+            let mut sum = None;
+            for i in 0..P::NUM_EXPERTS_PER_TOK {
+                let (i, w) = idx_w[i];
+                let w = dev.tensor(*w);
+                let y = self.experts[i].try_forward(x.clone())?;
+                let y = y.reshape_like(&(hidden,));
+
+                let y = w.broadcast_like(&y) * y;
+
+                sum = match sum {
+                    Some(old) => Some(old + y),
+                    None => Some(y),
+                };
+            }
+
+            result.push(sum.unwrap());
+        }
+
+        Ok(result.stack().realize())
     }
 }
 struct Block<E: Dtype, P: Params, D: Device<E>>
@@ -128,7 +175,7 @@ where
     rms_1: RmsNorm<P::Hidden, f32, D>,
     rms_2: RmsNorm<P::Hidden, f32, D>,
     mha: MHA<E, P, D>,
-    mlp: MLP<E, P, D>,
+    block_spare_moe: SpareMoeBlock<E, P, D>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -163,13 +210,13 @@ where
         let x = attn_out + residual;
         let residual = x.clone();
         let mlp_out = self
-            .mlp
+            .block_spare_moe
             .try_forward(self.rms_2.try_forward(x.to_dtype())?.to_dtype())?;
         Ok((residual + mlp_out, cache, mask))
     }
 }
 
-pub struct Mistral<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>>
+pub struct Mixtral<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>>
 where
     D1: Device<f32>,
     D2: Device<f32>,
@@ -201,14 +248,24 @@ where
         P::RMS_NORM_EPS,
     )?;
 
-    let k_proj = load_linear(dev, &loader.sub("self_attn.k_proj"))?;
-    let q_proj = load_linear(dev, &loader.sub("self_attn.q_proj"))?;
-    let v_proj = load_linear(dev, &loader.sub("self_attn.v_proj"))?;
-    let o_proj = load_linear(dev, &loader.sub("self_attn.o_proj"))?;
+    let attn_l = loader.sub("self_attn");
+    let k_proj = load_linear(dev, &attn_l.sub("k_proj"))?;
+    let q_proj = load_linear(dev, &attn_l.sub("q_proj"))?;
+    let v_proj = load_linear(dev, &attn_l.sub("v_proj"))?;
+    let o_proj = load_linear(dev, &attn_l.sub("o_proj"))?;
 
-    let down_proj = load_linear(dev, &loader.sub("mlp.down_proj"))?;
-    let up_proj = load_linear(dev, &loader.sub("mlp.up_proj"))?;
-    let gate_proj = load_linear(dev, &loader.sub("mlp.gate_proj"))?;
+    let moe_l = loader.sub("block_sparse_moe");
+    let gate = load_linear(dev, &moe_l.sub("gate"))?;
+
+    let exps_l = moe_l.sub("experts");
+    let mut experts = Vec::new();
+    for i in 0..P::NUM_LOCAL_EXPERTS {
+        let exp_l = exps_l.sub(format!("{i}"));
+        let w1 = load_linear(dev, &exp_l.sub("w1"))?;
+        let w2 = load_linear(dev, &exp_l.sub("w2"))?;
+        let w3 = load_linear(dev, &exp_l.sub("w3"))?;
+        experts.push(Expert { w1, w2, w3 });
+    }
 
     Ok(Block {
         rms_1: in_ln,
@@ -220,14 +277,10 @@ where
             o_proj,
             p,
         },
-        mlp: MLP {
-            fc1: gate_proj,
-            fc2: up_proj,
-            proj: down_proj,
-        },
+        block_spare_moe: SpareMoeBlock { gate, experts },
     })
 }
-impl<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>> Mistral<E, P, D1, D2>
+impl<E: Dtype, P: Params, D1: Device<E>, D2: Device<E>> Mixtral<E, P, D1, D2>
 where
     D1: Device<f32>,
     D2: Device<f32>,
@@ -332,9 +385,12 @@ pub trait Params: Debug + Clone + Copy {
     type KvHeads: ConstDim;
     type KvDim: ConstDim;
     type Layers: ConstDim;
+    type GateDim: ConstDim;
     const MAX_SEQ_LEN: usize;
     const ROE_BASE: i64;
     const RMS_NORM_EPS: f64;
+    const NUM_EXPERTS_PER_TOK: usize;
+    const NUM_LOCAL_EXPERTS: usize;
 
     fn vocab(&self) -> Self::Vocab;
     fn hidden(&self) -> Self::Hidden;

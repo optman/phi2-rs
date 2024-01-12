@@ -4,7 +4,7 @@ use dfdx::prelude::*;
 use rand::prelude::{SeedableRng, StdRng};
 
 mod model;
-use model::Mistral;
+use model::Mixtral;
 
 mod nn_loader;
 
@@ -69,8 +69,9 @@ fn main() -> Result<()> {
 
     let root = args.model_path;
     let paths = vec![
-        format!("{root}/model-00001-of-00002.safetensors"),
-        format!("{root}/model-00002-of-00002.safetensors"),
+        format!("{root}/model-00001-of-00003.safetensors"),
+        format!("{root}/model-00002-of-00003.safetensors"),
+        format!("{root}/model-00003-of-00003.safetensors"),
     ];
 
     let tokenizer_model = format!("{root}/tokenizer.json");
@@ -85,7 +86,7 @@ fn main() -> Result<()> {
 
     let cfg = ConfigV2 {};
 
-    let m = Mistral::<f16, _, _, _>::load_model(cfg, &dev, &dev2, &loader, args.split)?;
+    let m = Mixtral::<f16, _, _, _>::load_model(cfg, &dev, &dev2, &loader, args.split)?;
 
     let gen_opt = GenerateOption {
         use_cache: !args.disable_cache,

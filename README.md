@@ -1,6 +1,6 @@
 ## phi2-rs
 
-load Mistral 7B LLM model with [dfdx](https://github.com/coreylowman/dfdx).
+load Mixtral 7Bx2 LLM model with [dfdx](https://github.com/coreylowman/dfdx).
 
 Because dfdx not support bf16 type yet, we load model weights in f32, that would not fit in 16G gup memory.
 

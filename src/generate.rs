@@ -1,6 +1,6 @@
 use crate::{
     cache::Cache,
-    model::{Dtype, Mistral, Params},
+    model::{Dtype, Mixtral, Params},
 };
 use dfdx::prelude::*;
 use rand::{rngs::StdRng, Rng};
@@ -42,7 +42,7 @@ pub fn generate<E: Dtype, P: Params, D: Device<E>, D2: Device<E>>(
     rng: &mut StdRng,
     dev: &D,
     _dev2: &D2,
-    m: &Mistral<E, P, D, D2>,
+    m: &Mixtral<E, P, D, D2>,
     prompt: &str,
     gen_num: usize,
     opt: &GenerateOption,
