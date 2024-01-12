@@ -1,4 +1,4 @@
-use ::safetensors::tensor::{SafeTensorError, SafeTensors};
+use ::safetensors::tensor::{Dtype as STDtype, SafeTensorError, SafeTensors, TensorView};
 use anyhow::{Error, Result};
 use dfdx::prelude::*;
 use half::bf16;
@@ -60,18 +60,27 @@ impl SafeTensorLoader {
         paths.push(path.to_owned());
         let full_path = paths.join(".");
 
-        let mut t: Tensor<_, E, _> = dev.zeros();
         let mut err = None;
         for ts in &*self.tensors {
-            match load_safetensor_bf16(&mut t, &ts.get().0, &full_path) {
-                Ok(_) => {
-                    return Ok(t);
-                }
+            let tv = match ts.get().0.tensor(&full_path) {
+                Ok(tv) => tv,
                 Err(e @ SafeTensorError::TensorNotFound(_)) => {
                     err = Some(Error::from(e));
                     continue;
                 }
                 Err(e) => return Err(Error::from(e)),
+            };
+
+            let mut t: Tensor<_, E, _> = dev.zeros();
+            match tv.dtype() {
+                STDtype::BF16 => {
+                    load_safetensor_bf16(&mut t, &tv)?;
+                    return Ok(t);
+                }
+                _ => {
+                    t.load_safetensor(&ts.get().0, &full_path)?;
+                    return Ok(t);
+                }
             }
         }
 
@@ -84,13 +93,11 @@ impl SafeTensorLoader {
 
 fn load_safetensor_bf16<S: Shape, E: Dtype, D: CopySlice<E>>(
     t: &mut Tensor<S, E, D>,
-    tensors: &SafeTensors,
-    key: &str,
+    tv: &TensorView,
 ) -> Result<(), SafeTensorError> {
-    let tensor_view = tensors.tensor(key)?;
-    let v = tensor_view.data();
+    let v = tv.data();
     assert_eq!(
-        tensor_view.shape(),
+        tv.shape(),
         t.shape().concrete().into(),
         "SafeTensors shape did not match tensor shape"
     );
