@@ -142,9 +142,14 @@ impl<E: Dtype, P: Params, D: Device<E>> SpareMoeBlock<E, P, D> {
             let weights = weights.iter().skip(seq * loc_exp).take(loc_exp);
             let mut idx_w = weights.enumerate().collect::<Vec<(usize, &E)>>();
             idx_w.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap());
+            let sum = idx_w
+                .iter()
+                .take(P::NUM_EXPERTS_PER_TOK)
+                .map(|(_, w)| w.to_f32().unwrap())
+                .sum::<f32>();
             for i in 0..P::NUM_EXPERTS_PER_TOK {
                 let (e, w) = idx_w[i];
-                sew.push((e, *w));
+                sew.push((e, *w / E::from_f32(sum).unwrap()));
                 es[i].push(seq);
             }
         }
