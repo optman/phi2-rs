@@ -138,9 +138,9 @@ impl<E: Dtype, P: Params, D: Device<E>> SpareMoeBlock<E, P, D> {
         let dev = x.dev();
         let mut sew = Vec::with_capacity(seq_len * P::NUM_EXPERTS_PER_TOK);
         let mut es = std::iter::repeat(vec![]).take(loc_exp).collect::<Vec<_>>();
-        for seq in 0..seq_len {
-            let weights = weights.iter().skip(seq * loc_exp).take(loc_exp);
-            let mut idx_w = weights.enumerate().collect::<Vec<(usize, &E)>>();
+
+        for (seq, idx_w) in weights.into_iter().chunks(loc_exp).into_iter().enumerate() {
+            let mut idx_w = idx_w.enumerate().collect::<Vec<_>>();
             idx_w.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap());
             let sum = idx_w
                 .iter()
@@ -149,7 +149,7 @@ impl<E: Dtype, P: Params, D: Device<E>> SpareMoeBlock<E, P, D> {
                 .sum::<f32>();
             for i in 0..P::NUM_EXPERTS_PER_TOK {
                 let (e, w) = idx_w[i];
-                sew.push((e, *w / E::from_f32(sum).unwrap()));
+                sew.push((e, w / E::from_f32(sum).unwrap()));
                 es[i].push(seq);
             }
         }
