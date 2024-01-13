@@ -6,6 +6,7 @@ use crate::tensor_loader::SafeTensorLoader;
 use anyhow::Result;
 use dfdx::dtypes::{f16, AMP};
 use dfdx::prelude::*;
+use itertools::Itertools;
 use std::fmt::Debug;
 
 pub trait Dtype: dfdx::prelude::Dtype + num_traits::Float {}
@@ -130,32 +131,42 @@ impl<E: Dtype, P: Params, D: Device<E>> SpareMoeBlock<E, P, D> {
         x: Tensor<(Seq, P::Hidden), E, D>,
     ) -> Result<Tensor<(Seq, P::Hidden), E, D>> {
         let weights = self.gate.try_forward(x.clone())?;
-        let (seq_len, loc_exp) = *weights.shape();
+        let (seq_len, loc_exp) = weights.shape();
+        let (seq_len, loc_exp) = (seq_len.size(), loc_exp.size());
         let weights = weights.softmax::<Axis<1>>().as_vec();
+
         let dev = x.dev();
-        let hidden = x.shape().1;
-
-        let mut result = Vec::new();
-
-        for seq in 0..seq_len.size() {
-            let weights = weights
-                .iter()
-                .skip(seq * loc_exp.size())
-                .take(loc_exp.size());
+        let mut sew = Vec::with_capacity(seq_len * P::NUM_EXPERTS_PER_TOK);
+        let mut es = std::iter::repeat(vec![]).take(loc_exp).collect::<Vec<_>>();
+        for seq in 0..seq_len {
+            let weights = weights.iter().skip(seq * loc_exp).take(loc_exp);
             let mut idx_w = weights.enumerate().collect::<Vec<(usize, &E)>>();
             idx_w.sort_unstable_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap());
-
-            let x = x.clone().gather(dev.tensor([seq]));
-
-            let mut sum = None;
             for i in 0..P::NUM_EXPERTS_PER_TOK {
-                let (i, w) = idx_w[i];
-                let w = dev.tensor(*w);
-                let y = self.experts[i].try_forward(x.clone())?;
-                let y = y.reshape_like(&(hidden,));
+                let (e, w) = idx_w[i];
+                sew.push((e, *w));
+                es[i].push(seq);
+            }
+        }
 
-                let y = w.broadcast_like(&y) * y;
+        let mut ys = Vec::with_capacity(loc_exp);
+        for i in 0..loc_exp {
+            let xs = &es[i];
+            let idx = dev.tensor_from_vec(xs.clone(), (xs.len(),));
+            let xs = x.clone().gather(idx);
+            ys.push(self.experts[i].try_forward(xs)?);
+        }
 
+        let mut idx = vec![0; loc_exp];
+        let mut result = Vec::with_capacity(seq_len);
+        for rs in &sew.into_iter().chunks(P::NUM_EXPERTS_PER_TOK) {
+            let mut sum = None;
+            for (e, w) in rs {
+                let i = idx[e];
+                idx[e] = i + 1;
+                let i = dev.tensor(i);
+                let y = ys[e].clone().select(i);
+                let y = y * w.to_f32().unwrap();
                 sum = match sum {
                     Some(old) => Some(old + y),
                     None => Some(y),

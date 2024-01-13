@@ -746,6 +746,7 @@ dependencies = [
  "dfdx-core",
  "dfdx-derives",
  "half",
+ "itertools",
  "memmap2 0.7.1",
  "num-traits",
  "rand",
