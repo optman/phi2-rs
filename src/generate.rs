@@ -75,9 +75,10 @@ where
     let (mut y, mut cache) = m.try_forward(x, pos, opt.pos_scale, cache).unwrap();
     pos += if cache.is_some() { x_len } else { 0 };
 
+    let max_seq_len = core::cmp::min(opt.max_seq_len, P::MAX_SEQ_LEN);
     let mut early_break = None;
     for i in 0..gen_num {
-        if seq.len() >= opt.max_seq_len {
+        if seq.len() >= max_seq_len {
             early_break = Some(i);
             break;
         }
