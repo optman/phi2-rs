@@ -150,16 +150,20 @@ impl<E: Dtype, P: Params, D: Device<E>> SpareMoeBlock<E, P, D> {
             for i in 0..P::NUM_EXPERTS_PER_TOK {
                 let (e, w) = idx_w[i];
                 sew.push((e, w / E::from_f32(sum).unwrap()));
-                es[i].push(seq);
+                es[e].push(seq);
             }
         }
 
         let mut ys = Vec::with_capacity(loc_exp);
         for i in 0..loc_exp {
             let xs = &es[i];
+            if xs.len() == 0 {
+                ys.push(None);
+                continue;
+            }
             let idx = dev.tensor_from_vec(xs.clone(), (xs.len(),));
             let xs = x.clone().gather(idx);
-            ys.push(self.experts[i].try_forward(xs)?);
+            ys.push(Some(self.experts[i].try_forward(xs)?));
         }
 
         let mut idx = vec![0; loc_exp];
@@ -170,7 +174,7 @@ impl<E: Dtype, P: Params, D: Device<E>> SpareMoeBlock<E, P, D> {
                 let i = idx[e];
                 idx[e] = i + 1;
                 let i = dev.tensor(i);
-                let y = ys[e].clone().select(i);
+                let y = ys[e].clone().unwrap().select(i);
                 let y = y * w.to_f32().unwrap();
                 sum = match sum {
                     Some(old) => Some(old + y),
