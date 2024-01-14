@@ -58,8 +58,8 @@ struct Cli {
     #[arg(long, short)]
     model_path: String,
 
-    #[arg(long, default_value_t = 16)]
-    split: usize,
+    #[arg(long)]
+    split: Option<usize>,
 }
 
 fn main() -> Result<()> {
