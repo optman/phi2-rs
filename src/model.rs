@@ -237,20 +237,26 @@ where
         dev: &D1,
         dev2: &D2,
         loader: &SafeTensorLoader,
-        split: usize,
+        split: Option<usize>,
     ) -> Result<Self> {
         let loader = loader.sub("model");
         let embedding = load_emedding(dev, &loader.sub("embed_tokens"))?;
 
         let mut blocks1 = Vec::new();
-        let layers = p.layers().size();
-        for i in 0..split {
-            blocks1.push(load_block(i, p, dev, &loader)?);
-        }
-
         let mut blocks2 = Vec::new();
-        for i in split..layers {
-            blocks2.push(load_block(i, p, dev2, &loader)?);
+        let layers = p.layers().size();
+        if let Some(split) = split {
+            for i in 0..split {
+                blocks1.push(load_block(i, p, dev, &loader)?);
+            }
+
+            for i in split..layers {
+                blocks2.push(load_block(i, p, dev2, &loader)?);
+            }
+        } else {
+            for i in 0..layers {
+                blocks1.push(load_block(i, p, dev, &loader)?);
+            }
         }
 
         let pos_enc1 = RotaryEmbedding::new(dev, p.head_dim(), P::MAX_SEQ_LEN, P::ROE_BASE);
