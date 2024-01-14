@@ -5,20 +5,20 @@ pub struct ConfigV2 {}
 
 impl Params for ConfigV2 {
     type Vocab = Const<32000>;
-    type Hidden = Const<4096>;
-    type MlpDim = Const<14336>;
+    type Hidden = Const<2048>;
+    type MlpDim = Const<5632>;
     type Heads = Const<32>;
-    type HeadDim = Const<128>;
-    type KvHeads = Const<8>;
-    type KvDim = Const<1024>;
-    type Layers = Const<32>;
-    type GateDim = Const<2>;
+    type HeadDim = Const<64>;
+    type KvHeads = Const<4>;
+    type KvDim = Const<256>;
+    type Layers = Const<22>;
+    type GateDim = Const<4>;
 
-    const MAX_SEQ_LEN: usize = 32768;
+    const MAX_SEQ_LEN: usize = 2048;
     const ROE_BASE: i64 = 10000;
     const RMS_NORM_EPS: f64 = 1e-5;
     const NUM_EXPERTS_PER_TOK: usize = 2;
-    const NUM_LOCAL_EXPERTS: usize = 2;
+    const NUM_LOCAL_EXPERTS: usize = 4;
 
     fn vocab(&self) -> Self::Vocab {
         Self::Vocab {}

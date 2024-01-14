@@ -68,11 +68,7 @@ fn main() -> Result<()> {
     let mut rng = StdRng::seed_from_u64(args.seed);
 
     let root = args.model_path;
-    let paths = vec![
-        format!("{root}/model-00001-of-00003.safetensors"),
-        format!("{root}/model-00002-of-00003.safetensors"),
-        format!("{root}/model-00003-of-00003.safetensors"),
-    ];
+    let paths = vec![format!("{root}/model-00001-of-00001.safetensors")];
 
     let tokenizer_model = format!("{root}/tokenizer.json");
     let tokenizer = Tokenizer::from_file(tokenizer_model).map_err(anyhow::Error::msg)?;
