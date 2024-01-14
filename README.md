@@ -1,4 +1,4 @@
 ## phi2-rs
 
-load tinyllama LLM model with [dfdx](https://github.com/coreylowman/dfdx).
+load smol_llama-101M-GQA model with [dfdx](https://github.com/coreylowman/dfdx).
 

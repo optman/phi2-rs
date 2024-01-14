@@ -3,7 +3,6 @@ use crate::{
     model::{Dtype, Params, TinyLlama},
 };
 use dfdx::prelude::*;
-use half::f16;
 use rand::{rngs::StdRng, Rng};
 use std::{collections::HashSet, fmt::Debug, io::Write};
 use tokenizers::tokenizer::Tokenizer;
@@ -49,7 +48,7 @@ pub fn generate<E: Dtype, P: Params, D: Device<E>>(
     eos_token: &str,
 ) -> (usize, String)
 where
-    D: Device<f32> + Device<f16> + ToDtypeKernel<f16, E> + ToDtypeKernel<E, f16>,
+    D: Device<f32>,
 {
     if opt.verbose {
         print!("{:}", prompt);

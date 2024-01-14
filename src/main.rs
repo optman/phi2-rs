@@ -1,5 +1,4 @@
 use anyhow::Result;
-use dfdx::dtypes::f16;
 use dfdx::prelude::*;
 use rand::prelude::{SeedableRng, StdRng};
 
@@ -55,11 +54,7 @@ struct Cli {
     #[arg(
         long,
         short,
-        default_value = "<|system|>
-You are a chatbot who can help code!</s>
-<|user|>
-Write me a function to calculate the first 10 digits of the fibonacci sequence in Python and print it out to the CLI.</s>
-<|assistant|>"
+        default_value = "The process of photosynthesis involves the conversion of"
     )]
     prompt: String,
 
@@ -86,7 +81,7 @@ fn main() -> Result<()> {
 
     let cfg = ConfigV2 {};
 
-    let m = TinyLlama::<f16, _, _>::load_model(cfg, &dev, &loader)?;
+    let m = TinyLlama::<f32, _, _>::load_model(cfg, &dev, &loader)?;
 
     let gen_opt = GenerateOption {
         use_cache: !args.disable_cache,
