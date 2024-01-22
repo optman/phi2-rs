@@ -293,7 +293,6 @@ dependencies = [
 [[package]]
 name = "dfdx"
 version = "0.13.0"
-source = "git+https://github.com/coreylowman/dfdx#4615ac105a16f45e45d6ccfd403099daf437a944"
 dependencies = [
  "dfdx-core",
  "dfdx-derives",
@@ -305,7 +304,6 @@ dependencies = [
 [[package]]
 name = "dfdx-core"
 version = "0.13.0"
-source = "git+https://github.com/coreylowman/dfdx#4615ac105a16f45e45d6ccfd403099daf437a944"
 dependencies = [
  "cudarc",
  "gemm",
@@ -323,7 +321,6 @@ dependencies = [
 [[package]]
 name = "dfdx-derives"
 version = "0.13.0"
-source = "git+https://github.com/coreylowman/dfdx#4615ac105a16f45e45d6ccfd403099daf437a944"
 dependencies = [
  "dfdx-core",
  "proc-macro2",

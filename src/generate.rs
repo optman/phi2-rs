@@ -1,22 +1,15 @@
-use crate::{
-    cache::Cache,
-    model::{Dtype, Mistral, Params},
-};
-use dfdx::dtypes::f16;
+use crate::model::{Dtype, Mamba, Params};
 use dfdx::prelude::*;
 use rand::{rngs::StdRng, Rng};
 use std::{collections::HashSet, fmt::Debug, io::Write};
 use tokenizers::tokenizer::Tokenizer;
 
 pub struct GenerateOption {
-    pub use_cache: bool,
     pub top_k: usize,
     pub top_p: f32,
     pub temperature: Option<f32>,
     pub max_seq_len: usize,
-    pub pos_scale: usize,
     pub verbose: bool,
-    pub cache_size: usize,
     pub repeat_penalty: f32,
     pub repeat_last_n: usize,
 }
@@ -24,14 +17,11 @@ pub struct GenerateOption {
 impl Default for GenerateOption {
     fn default() -> Self {
         Self {
-            use_cache: true,
             top_k: 40,
             top_p: 0.95,
             temperature: None,
             max_seq_len: 1_000_000,
-            pos_scale: 1,
             verbose: false,
-            cache_size: 256,
             repeat_penalty: 1.1,
             repeat_last_n: 64,
         }
@@ -42,14 +32,14 @@ pub fn generate<E: Dtype, P: Params, D: Device<E>>(
     tokenizer: &Tokenizer,
     rng: &mut StdRng,
     dev: &D,
-    m: &Mistral<E, P, D>,
+    m: &Mamba<E, P, D>,
     prompt: &str,
     gen_num: usize,
     opt: &GenerateOption,
     eos_token: &str,
 ) -> (usize, String)
 where
-    D: Device<f32> + Device<f16> + ToDtypeKernel<f16, E> + ToDtypeKernel<E, f16>,
+    D: Device<f32>,
 {
     if opt.verbose {
         print!("{:}", prompt);
@@ -61,19 +51,10 @@ where
     let prompt = tokenizer.encode(prompt, true).unwrap();
     let mut seq: Vec<usize> = prompt.get_ids().iter().map(|c| *c as usize).collect();
 
-    let mut pos = 0;
     let seq_len = seq.len();
     let x = dev.tensor_from_vec(seq.clone(), (seq_len,));
 
-    let cache = if opt.use_cache {
-        Some(Cache::new(m.params().layers(), opt.cache_size))
-    } else {
-        None
-    };
-
-    let mut x_len = seq_len;
-    let (mut y, mut cache) = m.try_forward(x, pos, opt.pos_scale, cache).unwrap();
-    pos += if cache.is_some() { x_len } else { 0 };
+    let mut y = m.try_forward(x).unwrap();
 
     let max_seq_len = core::cmp::min(opt.max_seq_len, P::MAX_SEQ_LEN);
     let mut early_break = None;
@@ -82,7 +63,7 @@ where
             early_break = Some(i);
             break;
         }
-        let logits = y.select(dev.tensor(x_len - 1)).to_dtype::<f32>();
+        let logits = y.to_dtype::<f32>();
         let logits = if opt.repeat_penalty == 1.0 {
             logits
         } else {
@@ -108,22 +89,14 @@ where
         seq.push(next_idx);
 
         if opt.verbose {
-            if let Some(text) = tokenizer.id_to_token(next_idx as u32) {
-                let text = text.replace('▁', " ").replace("<0x0A>", "\n");
+            if let Ok(text) = tokenizer.decode(&[next_idx as u32], true) {
                 print!("{text}");
             }
             std::io::stdout().flush().unwrap();
         }
 
-        //next round
-        let (x, pos_inc) = if cache.is_some() {
-            (dev.tensor_from_vec(vec![next_idx], (1,)), 1)
-        } else {
-            (dev.tensor_from_vec(seq.clone(), (seq.len(),)), 0)
-        };
-        x_len = x.shape().0;
-        (y, cache) = m.try_forward(x, pos, opt.pos_scale, cache).unwrap();
-        pos += pos_inc;
+        let x = dev.tensor_from_vec(seq.clone(), (seq.len(),));
+        y = m.try_forward(x).unwrap();
     }
 
     (

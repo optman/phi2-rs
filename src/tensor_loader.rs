@@ -44,6 +44,7 @@ impl SafeTensorLoader {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn root(&self) -> Self {
         Self {
             tensors: self.tensors.clone(),

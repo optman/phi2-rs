@@ -4,48 +4,45 @@ use dfdx::prelude::*;
 pub struct ConfigV2 {}
 
 impl Params for ConfigV2 {
-    type Vocab = Const<32000>;
-    type Hidden = Const<4096>;
-    type MlpDim = Const<14336>;
-    type Heads = Const<32>;
-    type HeadDim = Const<128>;
-    type KvHeads = Const<8>;
-    type KvDim = Const<1024>;
-    type Layers = Const<32>;
+    type Vocab = Const<50280>;
+    type DModel = Const<768>;
+    type DtRank = Const<48>;
+    type DConv = Const<4>;
+    type DState = Const<16>;
+    type DInner = Const<1536>;
+    type DInnerX2 = Const<3072>;
+    type XProjO = Const<80>;
 
     const MAX_SEQ_LEN: usize = 32768;
-    const ROE_BASE: i64 = 10000;
     const RMS_NORM_EPS: f64 = 1e-5;
+    const LAYERS: usize = 24;
 
     fn vocab(&self) -> Self::Vocab {
         Self::Vocab {}
     }
 
-    fn hidden(&self) -> Self::Hidden {
-        Self::Hidden {}
+    fn d_model(&self) -> Self::DModel {
+        Self::DModel {}
     }
 
-    fn mlp_dim(&self) -> Self::MlpDim {
-        Self::MlpDim {}
+    fn dt_rank(&self) -> Self::DtRank {
+        Self::DtRank {}
+    }
+    fn d_conv(&self) -> Self::DConv {
+        Self::DConv {}
+    }
+    fn d_state(&self) -> Self::DState {
+        Self::DState {}
+    }
+    fn d_inner(&self) -> Self::DInner {
+        Self::DInner {}
     }
 
-    fn heads(&self) -> Self::Heads {
-        Self::Heads {}
+    fn d_inner_x2(&self) -> Self::DInnerX2 {
+        Self::DInnerX2 {}
     }
 
-    fn head_dim(&self) -> Self::HeadDim {
-        Self::HeadDim {}
-    }
-
-    fn kv_heads(&self) -> Self::KvHeads {
-        Self::KvHeads {}
-    }
-
-    fn kv_dim(&self) -> Self::KvDim {
-        Self::KvDim {}
-    }
-
-    fn layers(&self) -> Self::Layers {
-        Self::Layers {}
+    fn x_proj_o(&self) -> Self::XProjO {
+        Self::XProjO {}
     }
 }

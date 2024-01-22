@@ -29,7 +29,10 @@ pub(crate) fn load_linear<I: ConstDim, O: ConstDim, E: Dtype, D: Device<E>>(
     loader: &SafeTensorLoader,
 ) -> Result<Linear<I, O, E, D>> {
     let weight = loader.load_safetensor(dev, "weight")?;
-    let bias = dev.zeros();
+    let bias = match loader.load_safetensor(dev, "bias") {
+        Ok(bias) => bias,
+        Err(_) => dev.zeros(),
+    };
 
     Ok(Linear { weight, bias })
 }

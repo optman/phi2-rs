@@ -1,7 +1,5 @@
-use crate::cache::Cache;
 use crate::nn_loader::*;
 use crate::rmsnorm::RmsNorm;
-use crate::rotary::RotaryEmbedding;
 use crate::tensor_loader::SafeTensorLoader;
 use anyhow::Result;
 use dfdx::dtypes::{f16, AMP};
@@ -13,256 +11,190 @@ impl Dtype for f32 {}
 impl Dtype for f16 {}
 impl Dtype for AMP<f16> {}
 
-#[allow(clippy::upper_case_acronyms)]
-struct MHA<E: Dtype, P: Params, D: Device<E>> {
-    k_proj: Linear<P::Hidden, P::KvDim, E, D>,
-    q_proj: Linear<P::Hidden, P::Hidden, E, D>,
-    v_proj: Linear<P::Hidden, P::KvDim, E, D>,
-    o_proj: Linear<P::Hidden, P::Hidden, E, D>,
+struct MambaBlock<E: Dtype, P: Params, D: Device<E>> {
+    in_proj: Linear<P::DModel, P::DInnerX2, E, D>,
+    conv1d: (
+        //(OutChan, InChan/Group, Kernel)
+        Tensor<(P::DInner, Const<1>, P::DConv), E, D>,
+        //(OutChan,)
+        Tensor<(P::DInner,), E, D>,
+    ),
+    x_proj: Linear<P::DInner, P::XProjO, E, D>,
+    dt_proj: Linear<P::DtRank, P::DInner, E, D>,
+    a_log: Tensor<(P::DInner, P::DState), E, D>,
+    d: Tensor<(P::DInner,), E, D>,
+    out_proj: Linear<P::DInner, P::DModel, E, D>,
     p: P,
 }
-#[allow(clippy::type_complexity)]
-impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
+impl<E: Dtype, P: Params, D: Device<E>> MambaBlock<E, P, D> {
     pub fn try_forward<Seq: Dim>(
         &self,
-        x: Tensor<(Seq, P::Hidden), E, D>,
-        layer: usize,
-        pos: usize,
-        pos_scale: usize,
-        pos_enc: &RotaryEmbedding<P::HeadDim, E, D>,
-        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-        mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
-    ) -> Result<
-        (
-            Tensor<(Seq, P::Hidden), E, D>,
-            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-            Option<Tensor<(P::Heads, usize, usize), E, D>>,
-        ),
-        Error,
-    > {
-        let dev = x.dev().clone();
-        let (seq, hidden) = *x.shape();
-        let q = self.q_proj.try_forward(x.clone())?;
-        let k = self.k_proj.try_forward(x.clone())?;
-        let v = self.v_proj.try_forward(x)?;
+        x: Tensor<(Seq, P::DModel), E, D>,
+    ) -> Result<Tensor<(Seq, P::DModel), E, D>, Error> {
+        let (d_inner, d_conv) = (self.p.d_inner().size(), self.p.d_conv().size());
+        let seq = x.shape().0.size();
+        let xs_and_res = self.in_proj.try_forward(x)?;
+        let xs: Tensor<(usize, usize), _, _> = xs_and_res.clone().slice((.., ..d_inner)).realize();
+        let res: Tensor<(Seq, P::DInner), _, _> = xs_and_res.slice((.., d_inner..)).realize();
 
-        let qs = (seq.size(), self.p.heads(), self.p.head_dim());
-        let q = pos_enc.try_forward(q.reshape_like(&qs), pos, pos_scale)?;
+        let xs = xs.permute::<_, Axes2<1, 0>>();
+        let weight: Tensor<(usize, usize, usize), _, _> = self.conv1d.0.clone().realize();
+        let xs: Tensor<(P::DInner, usize), _, _> =
+            (xs, weight).conv1d(1, d_conv - 1, 1, d_inner).realize();
+        let xs = xs.clone() + self.conv1d.1.clone().broadcast_like(&xs);
+        let xs = xs.slice((.., ..seq));
+        let xs: Tensor<(Seq, P::DInner), _, _> = xs.permute::<_, Axes2<1, 0>>().realize();
+        let xs = xs.clone().sigmoid() * xs;
+        let res = res.clone().sigmoid() * res;
+        let ys = self.ssm(xs)? * res;
+        self.out_proj.try_forward(ys)
+    }
+    pub fn ssm<Seq: Dim>(
+        &self,
+        x: Tensor<(Seq, P::DInner), E, D>,
+    ) -> Result<Tensor<(Seq, P::DInner), E, D>, Error> {
+        let n = self.p.d_state().size();
+        let dt_rank = self.p.dt_rank().size();
+        let a = self.a_log.clone().exp().negate();
+        let d = self.d.clone();
+        let x_db1 = self.x_proj.try_forward(x.clone())?;
+        let delta: Tensor<(Seq, P::DtRank), _, _> = x_db1.clone().slice((.., ..dt_rank)).realize();
+        let b: Tensor<(Seq, P::DState), _, _> =
+            x_db1.clone().slice((.., dt_rank..dt_rank + n)).realize();
+        let c: Tensor<(Seq, P::DState), _, _> = x_db1.clone().slice((.., dt_rank + n..)).realize();
+        let delta = self.dt_proj.try_forward(delta)?;
+        let delta = (delta.exp() + 1.0).ln();
+        let ss = self.selective_scan(x, delta, a, b, c, d)?;
+        Ok(ss)
+    }
 
-        let kvs = (seq.size(), self.p.kv_heads(), self.p.head_dim());
-        let mut k = pos_enc.try_forward(k.reshape_like(&kvs), pos, pos_scale)?;
+    pub fn selective_scan<Seq: Dim>(
+        &self,
+        u: Tensor<(Seq, P::DInner), E, D>,
+        delta: Tensor<(Seq, P::DInner), E, D>,
+        a: Tensor<(P::DInner, P::DState), E, D>,
+        b: Tensor<(Seq, P::DState), E, D>,
+        c: Tensor<(Seq, P::DState), E, D>,
+        d: Tensor<(P::DInner,), E, D>,
+    ) -> Result<Tensor<(Seq, P::DInner), E, D>, Error> {
+        let dev = u.dev().clone();
+        let (l, d_in) = *u.shape();
+        let n = a.shape().1;
+        let delta = delta.broadcast_like(&(l, d_in, n));
+        let delta_a = (delta.clone() * a.broadcast_like(&(l, d_in, n))).exp();
+        let delta_b_u =
+            delta * b.broadcast_like(&(l, d_in, n)) * (u.clone().broadcast_like(&(l, d_in, n)));
 
-        let mut v = v.reshape_like(&kvs);
-
-        if let Some(cache) = cache.as_mut() {
-            (k, v) = cache.append(layer, k, v);
+        let mut xs = dev.zeros_like(&(d_in, n));
+        let mut ys = Vec::with_capacity(l.size());
+        for i in 0..l.size() {
+            xs = delta_a.clone().select(dev.tensor(i)) * xs
+                + delta_b_u.clone().select(dev.tensor(i));
+            let y = xs
+                .clone()
+                .matmul(c.clone().select(dev.tensor(i)))
+                .reshape_like(&(d_in,));
+            ys.push(y);
         }
+        let ys = ys.stack().realize();
 
-        let repeate = self.p.heads().size() / self.p.kv_heads().size();
-        let (kv_seq, _headers, _header_dim) = k.shape().concrete().into();
-        let kvs2 = (kv_seq, self.p.kv_heads(), repeate, self.p.head_dim());
-        let kvs3 = (kv_seq, self.p.heads(), self.p.head_dim());
-
-        //(seq, header, header_dim) -> (headers, seq, header_dim)
-        let q = q.permute::<_, Axes3<1, 0, 2>>();
-        let k = k
-            .broadcast_like(&kvs2)
-            .try_reshape_like(&kvs3)?
-            .permute::<_, Axes3<1, 0, 2>>();
-        let v = v
-            .broadcast_like(&kvs2)
-            .try_reshape_like(&kvs3)?
-            .permute::<_, Axes3<1, 0, 2>>();
-
-        let scale = (self.p.head_dim().size() as f64).sqrt().recip();
-        let mut att = q.matmul(k.permute::<_, Axes3<0, 2, 1>>()) * scale;
-
-        let mask = match mask {
-            Some(mask) => mask,
-            None => {
-                let attn_seq = kv_seq;
-                let mask = dev.upper_tri_like(&(attn_seq, attn_seq), E::neg_infinity(), 1);
-                let sub_mask_sel = ((attn_seq - seq.size())..attn_seq).collect();
-                let sub_mask_sel = dev.tensor_from_vec(sub_mask_sel, (seq.size(),));
-                mask.gather(sub_mask_sel).broadcast_like(&att).realize()
-            }
-        };
-        att = mask.clone() + att;
-
-        let att = att.softmax::<Axis<2>>();
-
-        let v: Tensor<(Seq, P::Hidden), _, _> = att
-            .matmul(v)
-            .permute::<_, Axes3<1, 0, 2>>()
-            .try_reshape_like(&(seq, hidden))?
-            .realize();
-
-        let out = self.o_proj.try_forward(v)?;
-        Ok((out, cache, Some(mask)))
+        Ok(ys + u * d.broadcast_like(&(l, d_in)))
     }
 }
 
-#[allow(clippy::upper_case_acronyms)]
-struct MLP<E: Dtype, P: Params, D: Device<E>> {
-    fc1: Linear<P::Hidden, P::MlpDim, E, D>,
-    fc2: Linear<P::Hidden, P::MlpDim, E, D>,
-    proj: Linear<P::MlpDim, P::Hidden, E, D>,
+struct ResidualBlock<E: Dtype, P: Params, D: Device<E>> {
+    ln: RmsNorm<P::DModel, E, D>,
+    mixer: MambaBlock<E, P, D>,
 }
-impl<E: Dtype, P: Params, D: Device<E>> MLP<E, P, D> {
+
+impl<E: Dtype, P: Params, D: Device<E>> ResidualBlock<E, P, D> {
     pub fn try_forward<Seq: Dim>(
         &self,
-        x: Tensor<(Seq, P::Hidden), E, D>,
-    ) -> Result<Tensor<(Seq, P::Hidden), E, D>> {
-        let y1 = self.fc1.try_forward(x.clone())?;
-        let y1 = y1.clone().sigmoid() * y1;
-        let y2 = self.fc2.try_forward(x)?;
-        let y = self.proj.try_forward(y1 * y2)?;
-        Ok(y)
-    }
-}
-struct Block<E: Dtype, P: Params, D: Device<E>>
-where
-    D: Device<f32>,
-{
-    rms_1: RmsNorm<P::Hidden, f32, D>,
-    rms_2: RmsNorm<P::Hidden, f32, D>,
-    mha: MHA<E, P, D>,
-    mlp: MLP<E, P, D>,
-}
-
-#[allow(clippy::type_complexity)]
-impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
-where
-    D: Device<f32> + ToDtypeKernel<E, f32> + ToDtypeKernel<f32, E>,
-{
-    pub fn try_forward<Seq: Dim>(
-        &self,
-        x: Tensor<(Seq, P::Hidden), E, D>,
-        layer: usize,
-        pos: usize,
-        pos_scale: usize,
-        pos_enc: &RotaryEmbedding<P::HeadDim, E, D>,
-        cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-        mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
-    ) -> Result<(
-        Tensor<(Seq, P::Hidden), E, D>,
-        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-        Option<Tensor<(P::Heads, usize, usize), E, D>>,
-    )> {
-        let residual = x.clone();
-        let (attn_out, cache, mask) = self.mha.try_forward(
-            self.rms_1.try_forward(x.clone().to_dtype())?.to_dtype(),
-            layer,
-            pos,
-            pos_scale,
-            pos_enc,
-            cache,
-            mask,
-        )?;
-        let x = attn_out + residual;
-        let residual = x.clone();
-        let mlp_out = self
-            .mlp
-            .try_forward(self.rms_2.try_forward(x.to_dtype())?.to_dtype())?;
-        Ok((residual + mlp_out, cache, mask))
+        x: Tensor<(Seq, P::DModel), E, D>,
+    ) -> Result<Tensor<(Seq, P::DModel), E, D>> {
+        let y = self.ln.try_forward(x.clone())?;
+        let y = self.mixer.try_forward(y)?;
+        Ok(x + y)
     }
 }
 
-pub struct Mistral<E: Dtype, P: Params, D: Device<E>>
-where
-    D: Device<f32>,
-{
-    embedding: Embedding<P::Vocab, P::Hidden, E, D>,
-    blocks: Vec<Block<E, P, D>>,
-    ln: RmsNorm<P::Hidden, f32, D>,
-    lm: Linear<P::Hidden, P::Vocab, E, D>,
-    pos_enc: RotaryEmbedding<P::HeadDim, E, D>,
+pub struct Mamba<E: Dtype, P: Params, D: Device<E>> {
+    embedding: Embedding<P::Vocab, P::DModel, E, D>,
+    blocks: Vec<ResidualBlock<E, P, D>>,
+    ln: RmsNorm<P::DModel, E, D>,
+    lm: Linear<P::DModel, P::Vocab, E, D>,
     p: P,
 }
 
-impl<E: Dtype, P: Params, D: Device<E>> Mistral<E, P, D>
-where
-    D: Device<f32> + ToDtypeKernel<f32, E> + ToDtypeKernel<E, f32>,
-{
+impl<E: Dtype, P: Params, D: Device<E>> Mamba<E, P, D> {
     pub fn load_model(p: P, dev: &D, loader: &SafeTensorLoader) -> Result<Self> {
-        let loader = loader.sub("model");
-        let ln = load_rmsnorm(dev, &loader.sub("norm"), P::RMS_NORM_EPS)?;
-        let embedding = load_emedding(dev, &loader.sub("embed_tokens"))?;
+        let loader = loader.sub("backbone");
+        let ln = load_rmsnorm(dev, &loader.sub("norm_f"), P::RMS_NORM_EPS)?;
+        let embedding = load_emedding(dev, &loader.sub("embedding"))?;
+        let lm = Linear {
+            weight: embedding.weight.clone(),
+            bias: dev.zeros(),
+        };
 
         let mut blocks = Vec::new();
 
-        for i in 0..p.layers().size() {
+        for i in 0..P::LAYERS {
             let loader = loader.sub(format!("layers.{i}"));
-            let in_ln = load_rmsnorm(dev, &loader.sub("input_layernorm"), P::RMS_NORM_EPS)?;
-            let post_ln = load_rmsnorm(
-                dev,
-                &loader.sub("post_attention_layernorm"),
-                P::RMS_NORM_EPS,
-            )?;
+            let ln = load_rmsnorm(dev, &loader.sub("norm"), P::RMS_NORM_EPS)?;
+            let loader = loader.sub("mixer");
+            let in_proj = load_linear(dev, &loader.sub("in_proj"))?;
+            let x_proj = load_linear(dev, &loader.sub("x_proj"))?;
+            let dt_proj = load_linear(dev, &loader.sub("dt_proj"))?;
+            let out_proj = load_linear(dev, &loader.sub("out_proj"))?;
+            let a_log = loader.load_safetensor(dev, "A_log")?;
+            let d = loader.load_safetensor(dev, "D")?;
 
-            let k_proj = load_linear(dev, &loader.sub("self_attn.k_proj"))?;
-            let q_proj = load_linear(dev, &loader.sub("self_attn.q_proj"))?;
-            let v_proj = load_linear(dev, &loader.sub("self_attn.v_proj"))?;
-            let o_proj = load_linear(dev, &loader.sub("self_attn.o_proj"))?;
+            let conv1d = (
+                loader.load_safetensor(dev, "conv1d.weight")?,
+                loader.load_safetensor(dev, "conv1d.bias")?,
+            );
 
-            let down_proj = load_linear(dev, &loader.sub("mlp.down_proj"))?;
-            let up_proj = load_linear(dev, &loader.sub("mlp.up_proj"))?;
-            let gate_proj = load_linear(dev, &loader.sub("mlp.gate_proj"))?;
-
-            blocks.push(Block {
-                rms_1: in_ln,
-                rms_2: post_ln,
-                mha: MHA {
-                    k_proj,
-                    q_proj,
-                    v_proj,
-                    o_proj,
+            blocks.push(ResidualBlock {
+                ln,
+                mixer: MambaBlock {
+                    in_proj,
+                    x_proj,
+                    dt_proj,
+                    out_proj,
+                    a_log,
+                    d,
+                    conv1d,
                     p,
-                },
-                mlp: MLP {
-                    fc1: gate_proj,
-                    fc2: up_proj,
-                    proj: down_proj,
                 },
             });
         }
-
-        let loader = loader.root();
-        let lm = load_linear(dev, &loader.sub("lm_head"))?;
-
-        let pos_enc = RotaryEmbedding::new(dev, p.head_dim(), P::MAX_SEQ_LEN, P::ROE_BASE);
 
         Ok(Self {
             embedding,
             blocks,
             ln,
             lm,
-            pos_enc,
             p,
         })
     }
 
-    #[allow(clippy::type_complexity)]
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq,), usize, D>,
-        pos: usize,
-        pos_scale: usize,
-        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-    ) -> Result<(
-        Tensor<(Seq, P::Vocab), E, D>,
-        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-    )> {
+    ) -> Result<Tensor<(P::Vocab,), E, D>> {
+        let dev = x.dev().clone();
+        let seq = x.shape().0.size();
         let mut x = self.embedding.try_forward(x)?;
-        let mut mask = None;
-        for (i, b) in self.blocks.iter().enumerate() {
-            (x, cache, mask) = b.try_forward(x, i, pos, pos_scale, &self.pos_enc, cache, mask)?;
+        for b in self.blocks.iter() {
+            x = b.try_forward(x)?;
         }
-        let x = self.ln.try_forward(x.to_dtype())?.to_dtype();
+        let x = x.gather(dev.tensor_from_vec(vec![seq - 1], (1,)));
+        let x = self.ln.try_forward(x)?;
         let x = self.lm.try_forward(x)?;
-        Ok((x, cache))
+        Ok(x.reshape_like(&(self.p.vocab(),)))
     }
 
+    #[allow(dead_code)]
     pub fn params(&self) -> &P {
         &self.p
     }
@@ -270,23 +202,23 @@ where
 
 pub trait Params: Debug + Clone + Copy {
     type Vocab: ConstDim;
-    type Hidden: ConstDim;
-    type MlpDim: ConstDim;
-    type Heads: ConstDim;
-    type HeadDim: ConstDim;
-    type KvHeads: ConstDim;
-    type KvDim: ConstDim;
-    type Layers: ConstDim;
+    type DModel: ConstDim;
+    type DtRank: ConstDim;
+    type DConv: ConstDim;
+    type DState: ConstDim;
+    type DInner: ConstDim;
+    type DInnerX2: ConstDim;
+    type XProjO: ConstDim;
     const MAX_SEQ_LEN: usize;
-    const ROE_BASE: i64;
     const RMS_NORM_EPS: f64;
+    const LAYERS: usize;
 
     fn vocab(&self) -> Self::Vocab;
-    fn hidden(&self) -> Self::Hidden;
-    fn mlp_dim(&self) -> Self::MlpDim;
-    fn heads(&self) -> Self::Heads;
-    fn head_dim(&self) -> Self::HeadDim;
-    fn kv_heads(&self) -> Self::KvHeads;
-    fn kv_dim(&self) -> Self::KvDim;
-    fn layers(&self) -> Self::Layers;
+    fn d_model(&self) -> Self::DModel;
+    fn dt_rank(&self) -> Self::DtRank;
+    fn d_conv(&self) -> Self::DConv;
+    fn d_state(&self) -> Self::DState;
+    fn d_inner(&self) -> Self::DInner;
+    fn d_inner_x2(&self) -> Self::DInnerX2;
+    fn x_proj_o(&self) -> Self::XProjO;
 }
