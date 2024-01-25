@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 use crate::cache::Cache;
 use crate::nn_loader::*;
 use crate::rmsnorm::RmsNorm;
@@ -96,6 +97,7 @@ impl<E: Dtype, P: Params, D: Device<E>> MambaBlock<E, P, D> {
         Ok(ss)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn selective_scan<Seq: Dim>(
         &self,
         u: Tensor<(Seq, P::DInner), E, D>,
