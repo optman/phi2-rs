@@ -23,6 +23,7 @@ struct MHA<E: Dtype, P: Params, D: Device<E>> {
 }
 #[allow(clippy::type_complexity)]
 impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -132,6 +133,7 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
 where
     D: Device<f32> + ToDtypeKernel<E, f32> + ToDtypeKernel<f32, E>,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
