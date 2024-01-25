@@ -37,6 +37,7 @@ impl Default for GenerateOption {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate<E: Dtype, P: Params, D: Device<E>, D2: Device<E>>(
     tokenizer: &Tokenizer,
     rng: &mut StdRng,
