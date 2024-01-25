@@ -24,6 +24,7 @@ struct MHA<E: Dtype, P: Params, D: Device<E>> {
 }
 #[allow(clippy::type_complexity)]
 impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -144,17 +145,18 @@ impl<E: Dtype, P: Params, D: Device<E>> SpareMoeBlock<E, P, D> {
                 .take(P::NUM_EXPERTS_PER_TOK)
                 .map(|(_, w)| w.to_f32().unwrap())
                 .sum::<f32>();
-            for i in 0..P::NUM_EXPERTS_PER_TOK {
-                let (e, w) = idx_w[i];
+
+            #[allow(clippy::needless_range_loop)]
+            for ew in idx_w.iter().take(P::NUM_EXPERTS_PER_TOK) {
+                let (e, w) = *ew;
                 sew.push((e, w / E::from_f32(sum).unwrap()));
                 es[e].push(seq);
             }
         }
 
         let mut ys = Vec::with_capacity(loc_exp);
-        for i in 0..loc_exp {
-            let xs = &es[i];
-            if xs.len() == 0 {
+        for (i, xs) in es.iter().enumerate().take(loc_exp) {
+            if xs.is_empty() {
                 ys.push(None);
                 continue;
             }
@@ -200,6 +202,7 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
 where
     D: Device<f32>,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -363,7 +366,7 @@ where
             x = b.try_forward(x, i, pos, pos_scale, &self.pos_enc1, cache1, &mut mask1)?;
         }
 
-        let x = if self.blocks2.len() > 0 {
+        let x = if !self.blocks2.is_empty() {
             let mut x = x.to_device(&D2::default());
 
             let mut mask2 = None;
