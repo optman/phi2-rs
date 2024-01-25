@@ -65,14 +65,16 @@ where
     let seq_len = seq.len();
     let x = dev.tensor_from_vec(seq.clone(), (seq_len,));
 
-    let cache = if opt.use_cache {
+    let mut cache = if opt.use_cache {
         Some(Cache::new(m.params().layers(), opt.cache_size))
     } else {
         None
     };
 
     let mut x_len = seq_len;
-    let (mut y, mut cache) = m.try_forward(x, pos, opt.pos_scale, cache).unwrap();
+    let mut y = m
+        .try_forward(x, pos, opt.pos_scale, &mut cache.as_mut())
+        .unwrap();
     pos += if cache.is_some() { x_len } else { 0 };
 
     let max_seq_len = core::cmp::min(opt.max_seq_len, P::MAX_SEQ_LEN);
@@ -122,7 +124,9 @@ where
             (dev.tensor_from_vec(seq.clone(), (seq.len(),)), 0)
         };
         x_len = x.shape().0;
-        (y, cache) = m.try_forward(x, pos, opt.pos_scale, cache).unwrap();
+        y = m
+            .try_forward(x, pos, opt.pos_scale, &mut cache.as_mut())
+            .unwrap();
         pos += pos_inc;
     }
 

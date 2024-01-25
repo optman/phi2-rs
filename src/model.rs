@@ -30,16 +30,9 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
         pos: usize,
         pos_scale: usize,
         pos_enc: &RotaryEmbedding<P::HeadDim, E, D>,
-        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-        mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
-    ) -> Result<
-        (
-            Tensor<(Seq, P::Hidden), E, D>,
-            Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-            Option<Tensor<(P::Heads, usize, usize), E, D>>,
-        ),
-        Error,
-    > {
+        cache: &mut Option<&mut Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
+        mask: &mut Option<Tensor<(P::Heads, usize, usize), E, D>>,
+    ) -> Result<Tensor<(Seq, P::Hidden), E, D>, Error> {
         let dev = x.dev().clone();
         let (seq, hidden) = *x.shape();
         let q = self.q_proj.try_forward(x.clone())?;
@@ -77,15 +70,19 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
         let scale = (self.p.head_dim().size() as f64).sqrt().recip();
         let mut att = q.matmul(k.permute::<_, Axes3<0, 2, 1>>()) * scale;
 
-        let mask = match mask {
-            Some(mask) => mask,
-            None => {
-                let attn_seq = kv_seq;
-                let mask = dev.upper_tri_like(&(attn_seq, attn_seq), E::neg_infinity(), 1);
-                let sub_mask_sel = ((attn_seq - seq.size())..attn_seq).collect();
-                let sub_mask_sel = dev.tensor_from_vec(sub_mask_sel, (seq.size(),));
-                mask.gather(sub_mask_sel).broadcast_like(&att).realize()
-            }
+        let mask = {
+            let _mask = match mask {
+                Some(mask) => mask.clone(),
+                None => {
+                    let attn_seq = kv_seq;
+                    let mask = dev.upper_tri_like(&(attn_seq, attn_seq), E::neg_infinity(), 1);
+                    let sub_mask_sel = ((attn_seq - seq.size())..attn_seq).collect();
+                    let sub_mask_sel = dev.tensor_from_vec(sub_mask_sel, (seq.size(),));
+                    mask.gather(sub_mask_sel).broadcast_like(&att).realize()
+                }
+            };
+            *mask = Some(_mask.clone());
+            _mask
         };
         att = mask.clone() + att;
 
@@ -98,7 +95,7 @@ impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
             .realize();
 
         let out = self.o_proj.try_forward(v)?;
-        Ok((out, cache, Some(mask)))
+        Ok(out)
     }
 }
 
@@ -142,15 +139,11 @@ where
         pos: usize,
         pos_scale: usize,
         pos_enc: &RotaryEmbedding<P::HeadDim, E, D>,
-        cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-        mask: Option<Tensor<(P::Heads, usize, usize), E, D>>,
-    ) -> Result<(
-        Tensor<(Seq, P::Hidden), E, D>,
-        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-        Option<Tensor<(P::Heads, usize, usize), E, D>>,
-    )> {
+        cache: &mut Option<&mut Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
+        mask: &mut Option<Tensor<(P::Heads, usize, usize), E, D>>,
+    ) -> Result<Tensor<(Seq, P::Hidden), E, D>> {
         let residual = x.clone();
-        let (attn_out, cache, mask) = self.mha.try_forward(
+        let attn_out = self.mha.try_forward(
             self.rms_1.try_forward(x.clone().to_dtype())?.to_dtype(),
             layer,
             pos,
@@ -164,7 +157,7 @@ where
         let mlp_out = self
             .mlp
             .try_forward(self.rms_2.try_forward(x.to_dtype())?.to_dtype())?;
-        Ok((residual + mlp_out, cache, mask))
+        Ok(residual + mlp_out)
     }
 }
 
@@ -248,22 +241,19 @@ where
         x: Tensor<(Seq,), usize, D>,
         pos: usize,
         pos_scale: usize,
-        mut cache: Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-    ) -> Result<(
-        Tensor<(Seq, P::Vocab), E, D>,
-        Option<Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
-    )>
+        cache: &mut Option<&mut Cache<P::KvHeads, P::HeadDim, P::Layers, E, D>>,
+    ) -> Result<Tensor<(Seq, P::Vocab), E, D>>
     where
         D: ToDtypeKernel<f16, E> + ToDtypeKernel<E, f16>,
     {
         let mut x = self.embedding.try_forward(x)?;
         let mut mask = None;
         for (i, b) in self.blocks.iter().enumerate() {
-            (x, cache, mask) = b.try_forward(x, i, pos, pos_scale, &self.pos_enc, cache, mask)?;
+            x = b.try_forward(x, i, pos, pos_scale, &self.pos_enc, cache, &mut mask)?;
         }
-        let x = self.ln.try_forward(x.to_dtype())?;
-        let x = self.lm.try_forward(x.to_dtype())?;
-        Ok((x, cache))
+        let x = self.ln.try_forward(x.to_dtype())?.to_dtype();
+        let x = self.lm.try_forward(x)?;
+        Ok(x)
     }
 
     pub fn params(&self) -> &P {
