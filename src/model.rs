@@ -23,6 +23,7 @@ struct MHA<E: Dtype, P: Params, D: Device<E>> {
 }
 #[allow(clippy::type_complexity)]
 impl<E: Dtype, P: Params, D: Device<E>> MHA<E, P, D> {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -133,6 +134,7 @@ impl<E: Dtype, P: Params, D: Device<E>> Block<E, P, D>
 where
     D: Device<f32>,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::Hidden), E, D>,
@@ -290,7 +292,7 @@ where
             x = b.try_forward(x, i, pos, pos_scale, &self.pos_enc1, cache1, &mut mask1)?;
         }
 
-        let x = if self.blocks2.len() > 0 {
+        let x = if !self.blocks2.is_empty() {
             let mut x = x.to_device(&D2::default());
 
             let mut mask2 = None;
