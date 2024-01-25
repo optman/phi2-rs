@@ -1,3 +1,4 @@
+use crate::cache::Cache;
 use crate::nn_loader::*;
 use crate::rmsnorm::RmsNorm;
 use crate::tensor_loader::SafeTensorLoader;
@@ -30,28 +31,55 @@ impl<E: Dtype, P: Params, D: Device<E>> MambaBlock<E, P, D> {
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::DModel), E, D>,
+        layer: usize,
+        mut cache: &mut Option<&mut Cache<P::DInner, P::DState, E, D>>,
     ) -> Result<Tensor<(Seq, P::DModel), E, D>, Error> {
         let (d_inner, d_conv) = (self.p.d_inner().size(), self.p.d_conv().size());
         let seq = x.shape().0.size();
         let xs_and_res = self.in_proj.try_forward(x)?;
-        let xs: Tensor<(usize, usize), _, _> = xs_and_res.clone().slice((.., ..d_inner)).realize();
+        let xs: Tensor<(usize, P::DInner), _, _> =
+            xs_and_res.clone().slice((.., ..d_inner)).realize();
         let res: Tensor<(Seq, P::DInner), _, _> = xs_and_res.slice((.., d_inner..)).realize();
 
         let xs = xs.permute::<_, Axes2<1, 0>>();
+        let mut padding = d_conv - 1;
+        let xs = if let Some(cache) = &mut cache {
+            let xs = if let Some(old) = &cache.conv_state[layer] {
+                padding = (d_conv - 1).saturating_sub(old.shape().1.size());
+                (old.clone(), xs).concat_tensor_along(Axis::<1>)
+            } else {
+                xs
+            };
+
+            let xs_len = xs.shape().1.size();
+            let idx = xs_len.saturating_sub(d_conv - 1);
+            let sub_xs = xs.clone().slice((.., idx..));
+            cache.conv_state[layer] = Some(sub_xs.clone());
+
+            xs
+        } else {
+            xs
+        };
+
+        let xs: Tensor<(usize, usize), _, _> = xs.realize();
         let weight: Tensor<(usize, usize, usize), _, _> = self.conv1d.0.clone().realize();
         let xs: Tensor<(P::DInner, usize), _, _> =
-            (xs, weight).conv1d(1, d_conv - 1, 1, d_inner).realize();
+            (xs, weight).conv1d(1, padding, 1, d_inner).realize();
         let xs = xs.clone() + self.conv1d.1.clone().broadcast_like(&xs);
         let xs = xs.slice((.., ..seq));
+
         let xs: Tensor<(Seq, P::DInner), _, _> = xs.permute::<_, Axes2<1, 0>>().realize();
         let xs = xs.clone().sigmoid() * xs;
         let res = res.clone().sigmoid() * res;
-        let ys = self.ssm(xs)? * res;
-        self.out_proj.try_forward(ys)
+        let ys = self.ssm(xs, layer, cache)? * res;
+        let ys = self.out_proj.try_forward(ys)?;
+        Ok(ys)
     }
     pub fn ssm<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::DInner), E, D>,
+        layer: usize,
+        cache: &mut Option<&mut Cache<P::DInner, P::DState, E, D>>,
     ) -> Result<Tensor<(Seq, P::DInner), E, D>, Error> {
         let n = self.p.d_state().size();
         let dt_rank = self.p.dt_rank().size();
@@ -64,7 +92,7 @@ impl<E: Dtype, P: Params, D: Device<E>> MambaBlock<E, P, D> {
         let c: Tensor<(Seq, P::DState), _, _> = x_db1.clone().slice((.., dt_rank + n..)).realize();
         let delta = self.dt_proj.try_forward(delta)?;
         let delta = (delta.exp() + 1.0).ln();
-        let ss = self.selective_scan(x, delta, a, b, c, d)?;
+        let ss = self.selective_scan(x, delta, a, b, c, d, layer, cache)?;
         Ok(ss)
     }
 
@@ -76,6 +104,8 @@ impl<E: Dtype, P: Params, D: Device<E>> MambaBlock<E, P, D> {
         b: Tensor<(Seq, P::DState), E, D>,
         c: Tensor<(Seq, P::DState), E, D>,
         d: Tensor<(P::DInner,), E, D>,
+        layer: usize,
+        cache: &mut Option<&mut Cache<P::DInner, P::DState, E, D>>,
     ) -> Result<Tensor<(Seq, P::DInner), E, D>, Error> {
         let dev = u.dev().clone();
         let (l, d_in) = *u.shape();
@@ -85,7 +115,11 @@ impl<E: Dtype, P: Params, D: Device<E>> MambaBlock<E, P, D> {
         let delta_b_u =
             delta * b.broadcast_like(&(l, d_in, n)) * (u.clone().broadcast_like(&(l, d_in, n)));
 
-        let mut xs = dev.zeros_like(&(d_in, n));
+        let mut xs = if let Some(old) = cache.as_ref().and_then(|c| c.ssm_state[layer].as_ref()) {
+            old.clone()
+        } else {
+            dev.zeros_like(&(d_in, n))
+        };
         let mut ys = Vec::with_capacity(l.size());
         for i in 0..l.size() {
             xs = delta_a.clone().select(dev.tensor(i)) * xs
@@ -96,6 +130,10 @@ impl<E: Dtype, P: Params, D: Device<E>> MambaBlock<E, P, D> {
                 .reshape_like(&(d_in,));
             ys.push(y);
         }
+        if let Some(cache) = cache {
+            cache.ssm_state[layer] = Some(xs);
+        }
+
         let ys = ys.stack().realize();
 
         Ok(ys + u * d.broadcast_like(&(l, d_in)))
@@ -111,9 +149,11 @@ impl<E: Dtype, P: Params, D: Device<E>> ResidualBlock<E, P, D> {
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq, P::DModel), E, D>,
+        layer: usize,
+        cache: &mut Option<&mut Cache<P::DInner, P::DState, E, D>>,
     ) -> Result<Tensor<(Seq, P::DModel), E, D>> {
         let y = self.ln.try_forward(x.clone())?;
-        let y = self.mixer.try_forward(y)?;
+        let y = self.mixer.try_forward(y, layer, cache)?;
         Ok(x + y)
     }
 }
@@ -181,17 +221,19 @@ impl<E: Dtype, P: Params, D: Device<E>> Mamba<E, P, D> {
     pub fn try_forward<Seq: Dim>(
         &self,
         x: Tensor<(Seq,), usize, D>,
+        cache: &mut Option<&mut Cache<P::DInner, P::DState, E, D>>,
     ) -> Result<Tensor<(P::Vocab,), E, D>> {
         let dev = x.dev().clone();
         let seq = x.shape().0.size();
         let mut x = self.embedding.try_forward(x)?;
-        for b in self.blocks.iter() {
-            x = b.try_forward(x)?;
+        for (i, b) in self.blocks.iter().enumerate() {
+            x = b.try_forward(x, i, cache)?;
         }
         let x = x.gather(dev.tensor_from_vec(vec![seq - 1], (1,)));
         let x = self.ln.try_forward(x)?;
         let x = self.lm.try_forward(x)?;
-        Ok(x.reshape_like(&(self.p.vocab(),)))
+        let y = x.reshape_like(&(self.p.vocab(),));
+        Ok(y)
     }
 
     #[allow(dead_code)]

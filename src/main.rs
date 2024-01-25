@@ -7,6 +7,8 @@ use model::Mamba;
 
 mod nn_loader;
 
+mod cache;
+
 mod rmsnorm;
 
 mod tensor_loader;
@@ -27,6 +29,9 @@ struct Cli {
 
     #[arg(short, default_value_t = 2048)]
     num_tokens: usize,
+
+    #[arg(long, default_value_t = false)]
+    disable_cache: bool,
 
     #[arg(long, default_value_t = 0.95)]
     top_p: f32,
@@ -69,6 +74,7 @@ fn main() -> Result<()> {
     let m = Mamba::<f32, _, _>::load_model(cfg, &dev, &loader)?;
 
     let gen_opt = GenerateOption {
+        use_cache: !args.disable_cache,
         verbose: true,
         top_k: args.top_k,
         top_p: args.top_p,

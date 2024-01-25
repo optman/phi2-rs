@@ -1,3 +1,4 @@
+use crate::cache::Cache;
 use crate::model::{Dtype, Mamba, Params};
 use dfdx::prelude::*;
 use rand::{rngs::StdRng, Rng};
@@ -5,6 +6,7 @@ use std::{collections::HashSet, fmt::Debug, io::Write};
 use tokenizers::tokenizer::Tokenizer;
 
 pub struct GenerateOption {
+    pub use_cache: bool,
     pub top_k: usize,
     pub top_p: f32,
     pub temperature: Option<f32>,
@@ -17,6 +19,7 @@ pub struct GenerateOption {
 impl Default for GenerateOption {
     fn default() -> Self {
         Self {
+            use_cache: true,
             top_k: 40,
             top_p: 0.95,
             temperature: None,
@@ -54,7 +57,13 @@ where
     let seq_len = seq.len();
     let x = dev.tensor_from_vec(seq.clone(), (seq_len,));
 
-    let mut y = m.try_forward(x).unwrap();
+    let mut cache = if opt.use_cache {
+        Some(Cache::new(P::LAYERS))
+    } else {
+        None
+    };
+
+    let mut y = m.try_forward(x, &mut cache.as_mut()).unwrap();
 
     let max_seq_len = core::cmp::min(opt.max_seq_len, P::MAX_SEQ_LEN);
     let mut early_break = None;
@@ -95,8 +104,12 @@ where
             std::io::stdout().flush().unwrap();
         }
 
-        let x = dev.tensor_from_vec(seq.clone(), (seq.len(),));
-        y = m.try_forward(x).unwrap();
+        let x = if opt.use_cache {
+            dev.tensor_from_vec(vec![next_idx], (1,))
+        } else {
+            dev.tensor_from_vec(seq.clone(), (seq.len(),))
+        };
+        y = m.try_forward(x, &mut cache.as_mut()).unwrap();
     }
 
     (
