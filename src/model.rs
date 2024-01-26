@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments)]
 use crate::cache::Cache;
 use crate::nn_loader::*;
 use crate::rmsnorm::RmsNorm;
