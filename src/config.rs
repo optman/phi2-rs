@@ -5,17 +5,17 @@ pub struct ConfigV2 {}
 
 impl Params for ConfigV2 {
     type Vocab = Const<50280>;
-    type DModel = Const<768>;
-    type DtRank = Const<48>;
+    type DModel = Const<2560>;
+    type DtRank = Const<160>;
     type DConv = Const<4>;
     type DState = Const<16>;
-    type DInner = Const<1536>;
-    type DInnerX2 = Const<3072>;
-    type XProjO = Const<80>;
+    type DInner = Const<5120>;
+    type DInnerX2 = Const<10240>;
+    type XProjO = Const<192>;
 
     const MAX_SEQ_LEN: usize = 32768;
     const RMS_NORM_EPS: f64 = 1e-5;
-    const LAYERS: usize = 24;
+    const LAYERS: usize = 64;
 
     fn vocab(&self) -> Self::Vocab {
         Self::Vocab {}
