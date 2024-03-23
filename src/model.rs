@@ -15,7 +15,9 @@ impl Dtype for AMP<f16> {}
 
 #[allow(clippy::upper_case_acronyms)]
 struct MHA<E: Dtype, P: Params, D: Device<E>> {
-    wqkv: Linear<P::Hidden, P::QkvDim, E, D>,
+    wq: Linear<P::Hidden, P::Hidden, E, D>,
+    wk: Linear<P::Hidden, P::Hidden, E, D>,
+    wv: Linear<P::Hidden, P::Hidden, E, D>,
     out_proj: Linear<P::Hidden, P::Hidden, E, D>,
     p: P,
 }
@@ -37,33 +39,17 @@ where
     ) -> Result<Tensor<(Seq, P::Hidden), E, D>, Error> {
         let dev = x.dev().clone();
         let (seq, hidden) = *x.shape();
-        let qkv = self
-            .wqkv
-            .try_forward(x)?
-            .try_reshape_like(&(seq, Const::<3>, hidden))?;
+        let q = self.wq.try_forward(x.clone())?;
+        let k = self.wk.try_forward(x.clone())?;
+        let v = self.wv.try_forward(x)?;
 
-        let qk_idx: Vec<_> = vec![vec![0, 1]; seq.size()].into_iter().flatten().collect();
-        let qks = (seq.size(), 2 * self.p.heads().size(), self.p.head_dim());
-        let qk = qkv
-            .clone()
-            .gather(dev.tensor_from_vec(qk_idx, (seq, Const::<2>)))
-            .reshape_like(&qks);
+        let qkvs = (seq.size(), self.p.heads(), self.p.head_dim());
+        let q = q.reshape_like(&qkvs);
+        let k = k.reshape_like(&qkvs);
+        let mut v = v.reshape_like(&qkvs);
 
-        let vs = (seq.size(), self.p.heads(), self.p.head_dim());
-        let mut v = qkv
-            .clone()
-            .select(dev.tensor_from_vec(vec![2; seq.size()], (seq,)))
-            .reshape_like(&vs);
-
-        let qks = (seq.size(), Const::<2>, self.p.heads(), self.p.head_dim());
-        let qk = pos_enc.try_forward(qk, pos, pos_scale)?.reshape_like(&qks);
-
-        let q = qk
-            .clone()
-            .select(dev.tensor_from_vec(vec![0; seq.size()], (seq.size(),)));
-        let mut k = qk
-            .clone()
-            .select(dev.tensor_from_vec(vec![1; seq.size()], (seq.size(),)));
+        let q = pos_enc.try_forward(q, pos, pos_scale)?;
+        let mut k = pos_enc.try_forward(k, pos, pos_scale)?;
 
         if let Some(cache) = cache.as_mut() {
             (k, v) = cache.append(layer, k, v);
@@ -182,29 +168,36 @@ where
     where
         D: Device<f16> + ToDtypeKernel<f16, E>,
     {
-        let loader = loader.sub("transformer");
-        let embedding = load_emedding(dev, &loader.sub("embd.wte"))?;
+        let loader = loader.sub("model");
+        let embedding = load_emedding(dev, &loader.sub("embed_tokens"))?;
 
         let mut blocks = Vec::new();
 
         for i in 0..p.layers().size() {
-            let loader = loader.sub(format!("h.{i}"));
-            let ln = load_layernorm(dev, &loader.sub("ln"))?;
-            let wqkv = load_linear(dev, &loader.sub("mixer.Wqkv"))?;
-            let out_proj = load_linear(dev, &loader.sub("mixer.out_proj"))?;
+            let loader = loader.sub(format!("layers.{i}"));
+            let ln = load_layernorm(dev, &loader.sub("input_layernorm"))?;
+            let wq = load_linear(dev, &loader.sub("self_attn.q_proj"))?;
+            let wk = load_linear(dev, &loader.sub("self_attn.k_proj"))?;
+            let wv = load_linear(dev, &loader.sub("self_attn.v_proj"))?;
+            let out_proj = load_linear(dev, &loader.sub("self_attn.dense"))?;
             let fc1 = load_linear(dev, &loader.sub("mlp.fc1"))?;
             let fc2 = load_linear(dev, &loader.sub("mlp.fc2"))?;
 
             blocks.push(Block {
                 ln,
-                mha: MHA { wqkv, out_proj, p },
+                mha: MHA {
+                    wq,
+                    wk,
+                    wv,
+                    out_proj,
+                    p,
+                },
                 mlp: MLP { fc1, fc2 },
             });
         }
 
-        let loader = loader.root();
-        let lm_ln = load_layernorm(dev, &loader.sub("lm_head.ln"))?;
-        let lm_linear = load_linear(dev, &loader.sub("lm_head.linear"))?;
+        let lm_ln = load_layernorm(dev, &loader.sub("final_layernorm"))?;
+        let lm_linear = load_linear(dev, &loader.root().sub("lm_head"))?;
 
         let pos_enc = RotaryEmbedding::new(dev, p.roe_dim(), P::MAX_SEQ_LEN, P::ROE_BASE);
 
